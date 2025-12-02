@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
 
-/// Solana DEX SQL Benchmarking Tool (Full SQL Logging)
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -83,7 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    // 1. 采样阶段
     println!("> Sampling {} rows (address + ts) from database...", args.sample_size);
     let sampled_data = fetch_sample_data(&pool, args.sample_size).await?;
     
@@ -220,7 +218,6 @@ fn get_random_no_anchor(rng: &mut impl Rng) -> i8 {
 
 // --- SQL Queries ---
 
-// Q1: ts < ?
 async fn run_q1(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
@@ -245,7 +242,6 @@ async fn run_q1(
     if verbose {
         println!("---------------------------------------------------");
         println!("[Q1] Time: {:?} | Rows: {}", duration, rows.len());
-        // 格式化时间，确保可以直接在 MySQL 中执行
         println!("SQL: SELECT * FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND ts < '{}' LIMIT 5;", 
             sample.token0_address, 
             platform, 
@@ -255,7 +251,6 @@ async fn run_q1(
     Ok(duration)
 }
 
-// Q2: Range
 async fn run_q2(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
@@ -309,7 +304,6 @@ async fn run_q2(
     Ok(duration)
 }
 
-// Q3: Force Index ts < ?
 async fn run_q3(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
@@ -352,7 +346,6 @@ async fn run_q3(
     Ok(duration)
 }
 
-// Q4: Count (*) ts < ?
 async fn run_q4(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
@@ -387,7 +380,6 @@ async fn run_q4(
     Ok(duration)
 }
 
-// Q5: Range Count
 async fn run_q5(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
