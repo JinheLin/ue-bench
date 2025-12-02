@@ -170,11 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("QPS: {:.2}", qps);
 
     println!("\n--- ⏱️  Latency Statistics (ms) ---");
-    print_percentiles("Q1 (Simple Select)", &mut all_q1);
-    print_percentiles("Q2 (Range Select)", &mut all_q2);
-    print_percentiles("Q3 (Force Index)", &mut all_q3);
-    print_percentiles("Q4 (Simple Count)", &mut all_q4);
-    print_percentiles("Q5 (Range Count)", &mut all_q5);
+    print_percentiles("Q1", &mut all_q1);
+    print_percentiles("Q2", &mut all_q2);
+    print_percentiles("Q3", &mut all_q3);
+    print_percentiles("Q4", &mut all_q4);
+    print_percentiles("Q5", &mut all_q5);
 
     Ok(())
 }
