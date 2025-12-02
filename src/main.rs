@@ -36,8 +36,6 @@ struct ThreadStats {
     q1_latencies: Vec<u128>,
     q2_latencies: Vec<u128>,
     q3_latencies: Vec<u128>,
-    q4_latencies: Vec<u128>,
-    q5_latencies: Vec<u128>,
     errors: usize,
 }
 
@@ -47,8 +45,6 @@ impl ThreadStats {
             q1_latencies: Vec::with_capacity(1000),
             q2_latencies: Vec::with_capacity(1000),
             q3_latencies: Vec::with_capacity(1000),
-            q4_latencies: Vec::with_capacity(1000),
-            q5_latencies: Vec::with_capacity(1000),
             errors: 0,
         }
     }
@@ -113,8 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     1 => run_q1(&pool, &mut rng, &data_pool, verbose).await,
                     2 => run_q2(&pool, &mut rng, &data_pool, max_days_back, verbose).await,
                     3 => run_q3(&pool, &mut rng, &data_pool, verbose).await,
-                    4 => run_q4(&pool, &mut rng, &data_pool, verbose).await,
-                    5 => run_q5(&pool, &mut rng, &data_pool, max_days_back, verbose).await,
                     _ => Ok(Duration::new(0, 0)),
                 };
 
@@ -125,8 +119,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             1 => stats.q1_latencies.push(micros),
                             2 => stats.q2_latencies.push(micros),
                             3 => stats.q3_latencies.push(micros),
-                            4 => stats.q4_latencies.push(micros),
-                            5 => stats.q5_latencies.push(micros),
                             _ => {}
                         }
                     }
@@ -145,8 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut all_q1 = Vec::new();
     let mut all_q2 = Vec::new();
     let mut all_q3 = Vec::new();
-    let mut all_q4 = Vec::new();
-    let mut all_q5 = Vec::new();
 
     for handle in handles {
         let stats = handle.await?;
@@ -154,12 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         all_q1.extend(stats.q1_latencies);
         all_q2.extend(stats.q2_latencies);
         all_q3.extend(stats.q3_latencies);
-        all_q4.extend(stats.q4_latencies);
-        all_q5.extend(stats.q5_latencies);
     }
 
     let elapsed = start_time.elapsed();
-    let total_requests = all_q1.len() + all_q2.len() + all_q3.len() + all_q4.len() + all_q5.len();
+    let total_requests = all_q1.len() + all_q2.len() + all_q3.len();
     let qps = total_requests as f64 / elapsed.as_secs_f64();
 
     println!("\n--- 📊 Benchmark Summary ---");
@@ -172,8 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_percentiles("Q1", &mut all_q1);
     print_percentiles("Q2", &mut all_q2);
     print_percentiles("Q3", &mut all_q3);
-    print_percentiles("Q4", &mut all_q4);
-    print_percentiles("Q5", &mut all_q5);
 
     Ok(())
 }
@@ -345,86 +331,3 @@ async fn run_q3(
     Ok(duration)
 }
 
-async fn run_q4(
-    pool: &Pool<MySql>, 
-    rng: &mut impl Rng, 
-    data_pool: &[SampleData],
-    verbose: bool
-) -> Result<Duration, sqlx::Error> {
-    let sample = get_test_sample(rng, data_pool);
-    let platform = get_random_platform(rng);
-    let offset_seconds = rng.gen_range(1..86400); 
-    let query_ts = sample.ts + ChronoDuration::seconds(offset_seconds);
-
-    let start = Instant::now();
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM dex_swap_tx_solana WHERE token0_address = ? AND platform = ? AND ts < ?"
-    )
-    .bind(&sample.token0_address)
-    .bind(platform)
-    .bind(query_ts)
-    .fetch_one(pool)
-    .await?;
-    let duration = start.elapsed();
-
-    if verbose {
-        println!("---------------------------------------------------");
-        println!("[Q4] Time: {:?} | Count: {}", duration.as_millis(), count);
-        println!("SQL: SELECT count(*) FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND ts < '{}';",
-            sample.token0_address, 
-            platform, 
-            query_ts.format("%Y-%m-%d %H:%M:%S")
-        );
-    }
-    Ok(duration)
-}
-
-async fn run_q5(
-    pool: &Pool<MySql>, 
-    rng: &mut impl Rng, 
-    data_pool: &[SampleData],
-    max_days_back: i64,
-    verbose: bool
-) -> Result<Duration, sqlx::Error> {
-    let sample = get_test_sample(rng, data_pool);
-    let platform = get_random_platform(rng);
-    let no_anchor: i8 = get_random_no_anchor(rng);
-
-    let window_days = rng.gen_range(1..=max_days_back);
-    let window_seconds = window_days * 86400;
-    let offset_seconds = rng.gen_range(0..window_seconds);
-    let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
-    let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
-
-    let start = Instant::now();
-    let count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*) FROM dex_swap_tx_solana 
-        WHERE token0_address = ? 
-        AND platform = ? 
-        AND no_anchor = ? 
-        AND ts >= ? AND ts <= ?
-        "#
-    )
-    .bind(&sample.token0_address)
-    .bind(platform)
-    .bind(no_anchor)
-    .bind(start_limit)
-    .bind(end_limit)
-    .fetch_one(pool)
-    .await?;
-    let duration = start.elapsed();
-
-    if verbose {
-        println!("---------------------------------------------------");
-        println!("[Q5] Time: {:?} | Count: {}", duration.as_millis(), count);
-        println!("SQL: SELECT count(*) FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND no_anchor = {} AND ts >= '{}' AND ts <= '{}';",
-            sample.token0_address, 
-            platform, 
-            no_anchor, 
-            start_limit.format("%Y-%m-%d %H:%M:%S"), 
-            end_limit.format("%Y-%m-%d %H:%M:%S")
-        );
-    }
-    Ok(duration)
-}
