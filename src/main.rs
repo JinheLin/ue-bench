@@ -69,7 +69,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("--- Starting Solana DEX Benchmark (Smart Sampling & Full SQL) ---");
-    println!("Target DB: {}", args.url);
     println!("Concurrency: {}", args.concurrency);
     println!("Max Days Back: {}", args.days_back);
     println!("Logging: {}", if args.verbose { "ENABLED (Full SQL)" } else { "DISABLED" });
@@ -241,7 +240,7 @@ async fn run_q1(
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Q1] Time: {:?} | Rows: {}", duration, rows.len());
+        println!("[Q1] Time: {:?} | Rows: {}", duration.as_millis(), rows.len());
         println!("SQL: SELECT * FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND ts < '{}' LIMIT 5;", 
             sample.token0_address, 
             platform, 
@@ -292,7 +291,7 @@ async fn run_q2(
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Q2] Time: {:?} | Rows: {}", duration, rows.len());
+        println!("[Q2] Time: {:?} | Rows: {}", duration.as_millis(), rows.len());
         println!("SQL: SELECT * FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND no_anchor = {} AND ts >= '{}' AND ts <= '{}' ORDER BY ts asc, height asc, tx_id asc, log_id asc LIMIT 10;",
             sample.token0_address, 
             platform, 
@@ -336,7 +335,7 @@ async fn run_q3(
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Q3] Time: {:?} | Rows: {}", duration, rows.len());
+        println!("[Q3] Time: {:?} | Rows: {}", duration.as_millis(), rows.len());
         println!("SQL: SELECT * FROM dex_swap_tx_solana USE INDEX (idx_desc) WHERE token0_address = '{}' AND platform = {} AND ts < '{}' ORDER BY ts DESC LIMIT 50;",
             sample.token0_address, 
             platform, 
@@ -370,7 +369,7 @@ async fn run_q4(
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Q4] Time: {:?} | Count: {}", duration, count);
+        println!("[Q4] Time: {:?} | Count: {}", duration.as_millis(), count);
         println!("SQL: SELECT count(*) FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND ts < '{}';",
             sample.token0_address, 
             platform, 
@@ -418,7 +417,7 @@ async fn run_q5(
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Q5] Time: {:?} | Count: {}", duration, count);
+        println!("[Q5] Time: {:?} | Count: {}", duration.as_millis(), count);
         println!("SQL: SELECT count(*) FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND no_anchor = {} AND ts >= '{}' AND ts <= '{}';",
             sample.token0_address, 
             platform, 
