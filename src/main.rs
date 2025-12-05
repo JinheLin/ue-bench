@@ -216,7 +216,7 @@ async fn run_q1(
     let query_ts = sample.ts + ChronoDuration::seconds(offset_seconds);
 
     let start = Instant::now();
-    let rows = sqlx::query("SELECT * FROM dex_swap_tx_solana WHERE token0_address = ? AND platform = ? AND ts < ? LIMIT 5")
+    let rows = sqlx::query("SELECT * FROM dex_swap_tx_solana USE INDEX (idx_desc) WHERE token0_address = ? AND platform = ? AND ts < ? order by ts desc LIMIT 5")
         .bind(&sample.token0_address)
         .bind(platform)
         .bind(query_ts)
@@ -227,7 +227,7 @@ async fn run_q1(
     if verbose {
         println!("---------------------------------------------------");
         println!("[Q1] Time: {:?} | Rows: {}", duration.as_millis(), rows.len());
-        println!("SQL: SELECT * FROM dex_swap_tx_solana WHERE token0_address = '{}' AND platform = {} AND ts < '{}' LIMIT 5;", 
+        println!("SQL: SELECT * FROM dex_swap_tx_solana USE INDEX (idx_desc) WHERE token0_address = '{}' AND platform = {} AND ts < '{}' order by ts desc LIMIT 5;", 
             sample.token0_address, 
             platform, 
             query_ts.format("%Y-%m-%d %H:%M:%S")
