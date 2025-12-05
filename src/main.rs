@@ -7,7 +7,7 @@ use rand::{Rng, SeedableRng};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::types::BigDecimal;
 use sqlx::{FromRow, MySql, Pool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,6 +46,7 @@ pub struct Args {
 pub struct SampleData {
     token0_address: String,
     ts: DateTime<Utc>,
+    maker: Option<String>,
 }
 
 /// 对应数据库表: `dex_swap_tx_solana`
@@ -319,6 +320,168 @@ impl BenchmarkScenario for Q2AscQuery {
     }
 }
 
+// --- Scenario 3: Type Filter Query (Random 0, 1, or both) ---
+struct Q3TypeQuery;
+
+#[async_trait]
+impl BenchmarkScenario for Q3TypeQuery {
+    fn name(&self) -> &str {
+        "Q3_Type_Filter"
+    }
+
+    async fn execute(
+        &self,
+        ctx: &BenchmarkContext,
+        rng: &mut StdRng,
+    ) -> Result<Duration, sqlx::Error> {
+        let sample = get_test_sample(rng, &ctx.samples);
+        let platform = 16;
+        let no_anchor = 0;
+
+        // --- 核心修改：随机选择 type 的取值范围 ---
+        // 随机生成 0, 1, 或 2
+        // 0 -> 只查 type=0
+        // 1 -> 只查 type=1
+        // 2 -> 查 type IN (0, 1)
+        let type_option = rng.gen_range(0..3);
+        let type_values = match type_option {
+            0 => "0",
+            1 => "1",
+            _ => "0, 1",
+        };
+
+        let window_days = rng.gen_range(1..=ctx.args.days_back);
+        let window_seconds = window_days * 86400;
+        let offset_seconds = rng.gen_range(0..window_seconds);
+
+        let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
+        let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+
+        let base_sql = format!(
+            r#"
+            SELECT * FROM dex_swap_tx_solana USE INDEX ({})
+            WHERE token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
+            AND type IN ({}) 
+            AND ts >= '{}' AND ts <= '{}' 
+            ORDER BY ts asc, height asc, tx_id asc, log_id asc 
+            LIMIT 10
+            "#,
+            "{}", // index placeholder
+            sample.token0_address,
+            platform,
+            no_anchor,
+            type_values, // 动态插入 "0", "1" 或 "0, 1"
+            start_limit,
+            end_limit
+        );
+
+        let target_sql = base_sql.replace("{}", "idx_asc");
+
+        let verify_sql = if ctx.args.verify {
+            Some(base_sql.replace("{}", "primary"))
+        } else {
+            None
+        };
+
+        run_sql_measure_verify(ctx, target_sql, verify_sql, self.name()).await
+    }
+}
+
+// --- Scenario 4: Maker IN (...) Query ---
+struct Q4MakerQuery;
+
+#[async_trait]
+impl BenchmarkScenario for Q4MakerQuery {
+    fn name(&self) -> &str {
+        "Q4_Maker_Filter"
+    }
+
+    async fn execute(
+        &self,
+        ctx: &BenchmarkContext,
+        rng: &mut StdRng,
+    ) -> Result<Duration, sqlx::Error> {
+        let sample = get_test_sample(rng, &ctx.samples);
+        let platform = 16;
+        let no_anchor = 0;
+
+        // --- 核心逻辑：构建 Maker 列表 ---
+        // 1. 决定要取几个 maker (1-5个)
+        let count = rng.gen_range(1..=5);
+
+        // 2. 收集 maker。
+        // 为了提高命中率，我们首先尝试把当前 sample 的 maker 放进去（如果非空），
+        // 然后再从全局 samples 中随机补足剩下的数量。
+        let mut selected_makers = HashSet::new();
+
+        if let Some(m) = &sample.maker {
+            selected_makers.insert(m.clone());
+        }
+
+        // 尝试补足到 count 个，为了防止死循环设置一个最大尝试次数
+        let mut attempts = 0;
+        while selected_makers.len() < count && attempts < 20 {
+            if let Some(random_sample) = ctx.samples.choose(rng) {
+                if let Some(m) = &random_sample.maker {
+                    selected_makers.insert(m.clone());
+                }
+            }
+            attempts += 1;
+        }
+
+        // 3. 格式化为 SQL 字符串: 'addr1', 'addr2'
+        // 如果集合为空（比如数据里全是 NULL），填入一个不存在的地址防止 SQL 语法错误
+        let makers_sql = if selected_makers.is_empty() {
+            "'00000000000000000000000000000000000000000000'".to_string()
+        } else {
+            selected_makers
+                .iter()
+                .map(|m| format!("'{}'", m))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let window_days = rng.gen_range(1..=ctx.args.days_back);
+        let window_seconds = window_days * 86400;
+        let offset_seconds = rng.gen_range(0..window_seconds);
+
+        let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
+        let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+
+        let base_sql = format!(
+            r#"
+            SELECT * FROM dex_swap_tx_solana USE INDEX ({})
+            WHERE token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
+            AND maker IN ({}) 
+            AND ts >= '{}' AND ts <= '{}' 
+            ORDER BY ts asc, height asc, tx_id asc, log_id asc 
+            LIMIT 10
+            "#,
+            "{}", // index placeholder
+            sample.token0_address,
+            platform,
+            no_anchor,
+            makers_sql, // 填入 'a', 'b', 'c'
+            start_limit,
+            end_limit
+        );
+
+        let target_sql = base_sql.replace("{}", "idx_asc");
+
+        let verify_sql = if ctx.args.verify {
+            Some(base_sql.replace("{}", "primary"))
+        } else {
+            None
+        };
+
+        run_sql_measure_verify(ctx, target_sql, verify_sql, self.name()).await
+    }
+}
+
 // ==========================================
 // 5. 主程序逻辑
 // ==========================================
@@ -367,8 +530,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 4. 注册场景 (在此处添加新查询)
-    let scenarios: Vec<Box<dyn BenchmarkScenario>> =
-        vec![Box::new(Q1DescQuery), Box::new(Q2AscQuery)];
+    let scenarios: Vec<Box<dyn BenchmarkScenario>> = vec![
+        Box::new(Q1DescQuery),
+        Box::new(Q2AscQuery),
+        Box::new(Q3TypeQuery),
+        Box::new(Q4MakerQuery),
+    ];
     let scenarios = Arc::new(scenarios);
 
     // 5. 启动并发任务
@@ -473,12 +640,32 @@ async fn fetch_sample_data(
     pool: &Pool<MySql>,
     limit: usize,
 ) -> Result<Vec<SampleData>, sqlx::Error> {
-    // 假设 db_create_time 存在索引，或者只取随机数据
-    // 这里简单 limit 取样
+    let fetch_size = limit * 3;
+
     let query = format!(
-        "SELECT token0_address, ts FROM dex_swap_tx_solana LIMIT {}",
-        limit
+        "SELECT token0_address, ts, maker FROM dex_swap_tx_solana ORDER BY ts DESC LIMIT {}",
+        fetch_size
     );
     let rows: Vec<SampleData> = sqlx::query_as(&query).fetch_all(pool).await?;
-    Ok(rows)
+    let mut seen = HashSet::new();
+    let mut unique_rows = Vec::with_capacity(limit);
+
+    for row in rows {
+        if seen.insert(row.token0_address.clone()) {
+            unique_rows.push(row);
+            if unique_rows.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    if unique_rows.len() < limit {
+        eprintln!(
+            "⚠️ Warning: Only found {} unique tokens (requested {})",
+            unique_rows.len(),
+            limit
+        );
+    }
+
+    Ok(unique_rows)
 }
