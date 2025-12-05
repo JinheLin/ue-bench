@@ -552,6 +552,196 @@ impl BenchmarkScenario for Q5VolumeQuery {
     }
 }
 
+struct Q6AscCombinedQuery;
+
+#[async_trait]
+impl BenchmarkScenario for Q6AscCombinedQuery {
+    fn name(&self) -> &str { "Q6_ASC_Combined_Filter" }
+
+    async fn execute(&self, ctx: &BenchmarkContext, rng: &mut StdRng) -> Result<Duration, sqlx::Error> {
+        let sample = get_test_sample(rng, &ctx.samples);
+        let platform = 16;
+        let no_anchor = 0;
+
+        // 1. Prepare Type Filter (0, 1, or both)
+        let type_option = rng.gen_range(0..3);
+        let type_values = match type_option {
+            0 => "0",
+            1 => "1",
+            _ => "0, 1",
+        };
+
+        // 2. Prepare Maker Filter (1-5 Random Makers)
+        let count = rng.gen_range(1..=5);
+        let mut selected_makers = HashSet::new();
+        
+        if let Some(m) = &sample.maker {
+            selected_makers.insert(m.clone());
+        }
+        
+        let mut attempts = 0;
+        while selected_makers.len() < count && attempts < 20 {
+            if let Some(random_sample) = ctx.samples.choose(rng) {
+                if let Some(m) = &random_sample.maker {
+                    selected_makers.insert(m.clone());
+                }
+            }
+            attempts += 1;
+        }
+
+        let makers_sql = if selected_makers.is_empty() {
+            "'00000000000000000000000000000000000000000000'".to_string()
+        } else {
+            selected_makers.iter()
+                .map(|m| format!("'{}'", m))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        // 3. Prepare Volume Filter
+        let min_vol = rng.gen_range(0.0..1000.0);
+        let max_vol = min_vol + rng.gen_range(10000.0..100_000_000.0);
+
+        // 4. Prepare Time Window
+        let window_days = rng.gen_range(1..=ctx.args.days_back);
+        let window_seconds = window_days * 86400;
+        let offset_seconds = rng.gen_range(0..window_seconds);
+        
+        let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
+        let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+
+        // 5. Construct Combined SQL
+        let base_sql = format!(
+            r#"
+            SELECT * FROM dex_swap_tx_solana USE INDEX ({})
+            WHERE token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
+            AND type IN ({}) 
+            AND maker IN ({}) 
+            AND volume >= {:.6} AND volume <= {:.6}
+            AND ts >= '{}' AND ts <= '{}' 
+            ORDER BY ts asc, height asc, tx_id asc, log_id asc 
+            LIMIT 10
+            "#,
+            "{}", // index placeholder
+            sample.token0_address, 
+            platform, 
+            no_anchor, 
+            type_values, // Type Filter
+            makers_sql,  // Maker Filter
+            min_vol, max_vol, // Volume Filter
+            start_limit, 
+            end_limit
+        );
+
+        let target_sql = base_sql.replace("{}", "idx_asc"); 
+        
+        let verify_sql = if ctx.args.verify {
+            Some(base_sql.replace("{}", "primary"))
+        } else {
+            None
+        };
+
+        run_sql_measure_verify(ctx, target_sql, verify_sql, self.name()).await
+    }
+}
+
+struct Q7DescCombinedQuery;
+
+#[async_trait]
+impl BenchmarkScenario for Q7DescCombinedQuery {
+    fn name(&self) -> &str { "Q7_DESC_Combined_Filter" }
+
+    async fn execute(&self, ctx: &BenchmarkContext, rng: &mut StdRng) -> Result<Duration, sqlx::Error> {
+        let sample = get_test_sample(rng, &ctx.samples);
+        let platform = 16;
+        let no_anchor = 0;
+
+        // 1. Prepare Type Filter (0, 1, or both)
+        let type_option = rng.gen_range(0..3);
+        let type_values = match type_option {
+            0 => "0",
+            1 => "1",
+            _ => "0, 1",
+        };
+
+        // 2. Prepare Maker Filter (1-5 Random Makers)
+        let count = rng.gen_range(1..=5);
+        let mut selected_makers = HashSet::new();
+        
+        if let Some(m) = &sample.maker {
+            selected_makers.insert(m.clone());
+        }
+        
+        let mut attempts = 0;
+        while selected_makers.len() < count && attempts < 20 {
+            if let Some(random_sample) = ctx.samples.choose(rng) {
+                if let Some(m) = &random_sample.maker {
+                    selected_makers.insert(m.clone());
+                }
+            }
+            attempts += 1;
+        }
+
+        let makers_sql = if selected_makers.is_empty() {
+            "'00000000000000000000000000000000000000000000'".to_string()
+        } else {
+            selected_makers.iter()
+                .map(|m| format!("'{}'", m))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        // 3. Prepare Volume Filter
+        let min_vol = rng.gen_range(0.0..1000.0);
+        let max_vol = min_vol + rng.gen_range(10000.0..100_000_000.0);
+
+        // 4. Prepare Time Window
+        let window_days = rng.gen_range(1..=ctx.args.days_back);
+        let window_seconds = window_days * 86400;
+        let offset_seconds = rng.gen_range(0..window_seconds);
+        
+        let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
+        let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+
+        // 5. Construct Combined SQL
+        let base_sql = format!(
+            r#"
+            SELECT * FROM dex_swap_tx_solana USE INDEX ({})
+            WHERE token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
+            AND type IN ({}) 
+            AND maker IN ({}) 
+            AND volume >= {:.6} AND volume <= {:.6}
+            AND ts >= '{}' AND ts <= '{}' 
+            ORDER BY ts desc, height desc, tx_id desc, log_id desc 
+            LIMIT 10
+            "#,
+            "{}", // index placeholder
+            sample.token0_address, 
+            platform, 
+            no_anchor, 
+            type_values, // Type Filter
+            makers_sql,  // Maker Filter
+            min_vol, max_vol, // Volume Filter
+            start_limit, 
+            end_limit
+        );
+
+        let target_sql = base_sql.replace("{}", "idx_desc"); 
+        
+        let verify_sql = if ctx.args.verify {
+            Some(base_sql.replace("{}", "primary"))
+        } else {
+            None
+        };
+
+        run_sql_measure_verify(ctx, target_sql, verify_sql, self.name()).await
+    }
+}
+
 // ==========================================
 // 5. 主程序逻辑
 // ==========================================
@@ -606,6 +796,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(Q3TypeQuery),
         Box::new(Q4MakerQuery),
         Box::new(Q5VolumeQuery),
+        Box::new(Q6AscCombinedQuery),
+        Box::new(Q7DescCombinedQuery),
     ];
     let scenarios = Arc::new(scenarios);
 
