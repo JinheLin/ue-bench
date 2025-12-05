@@ -482,6 +482,76 @@ impl BenchmarkScenario for Q4MakerQuery {
     }
 }
 
+// --- Scenario 5: Q2 + Volume Range Query ---
+struct Q5VolumeQuery;
+
+#[async_trait]
+impl BenchmarkScenario for Q5VolumeQuery {
+    fn name(&self) -> &str {
+        "Q5_Volume_Range"
+    }
+
+    async fn execute(
+        &self,
+        ctx: &BenchmarkContext,
+        rng: &mut StdRng,
+    ) -> Result<Duration, sqlx::Error> {
+        let sample = get_test_sample(rng, &ctx.samples);
+        let platform = 16;
+        let no_anchor = 0;
+
+        // --- 核心逻辑：生成 Volume 范围 ---
+        // 数据库 Min: ~0, Max: ~114,677,690
+        // 为了保证查询能命中数据，我们采用以下策略：
+        // 1. 下限 (min_vol): 在 0 到 10,000 之间随机 (大多数交易都在这个区间之上)
+        // 2. 上限 (max_vol): 在 10,000 到 120,000,000 之间随机 (覆盖中等到最大交易)
+        // 这样可以模拟查询 "所有大于微小金额" 的交易，或者 "特定中低金额区间" 的交易
+
+        let min_vol = rng.gen_range(0.0..1000.0); // 随机取一个较小的起步值
+        // 确保 max 肯定大于 min，且范围足够大
+        let max_vol = min_vol + rng.gen_range(10000.0..100_000_000.0);
+
+        let window_days = rng.gen_range(1..=ctx.args.days_back);
+        let window_seconds = window_days * 86400;
+        let offset_seconds = rng.gen_range(0..window_seconds);
+
+        let start_limit = sample.ts - ChronoDuration::seconds(offset_seconds);
+        let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+
+        // 基于 Q2 (ASC) 修改，增加 volume 范围
+        let base_sql = format!(
+            r#"
+            SELECT * FROM dex_swap_tx_solana USE INDEX ({})
+            WHERE token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
+            AND volume >= {:.6} AND volume <= {:.6}
+            AND ts >= '{}' AND ts <= '{}' 
+            ORDER BY ts asc, height asc, tx_id asc, log_id asc 
+            LIMIT 10
+            "#,
+            "{}", // index placeholder
+            sample.token0_address,
+            platform,
+            no_anchor,
+            min_vol,
+            max_vol, // 填入 volume 范围，保留6位小数防止科学计数法导致 SQL 格式问题
+            start_limit,
+            end_limit
+        );
+
+        let target_sql = base_sql.replace("{}", "idx_asc");
+
+        let verify_sql = if ctx.args.verify {
+            Some(base_sql.replace("{}", "primary"))
+        } else {
+            None
+        };
+
+        run_sql_measure_verify(ctx, target_sql, verify_sql, self.name()).await
+    }
+}
+
 // ==========================================
 // 5. 主程序逻辑
 // ==========================================
@@ -509,7 +579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. 获取采样数据
     println!(
-        "> Sampling {} rows (address + ts) from database...",
+        "> Sampling {} rows (address + ts + maker) from database...",
         args.sample_size
     );
     let sampled_data = fetch_sample_data(&pool, args.sample_size).await?;
@@ -535,6 +605,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(Q2AscQuery),
         Box::new(Q3TypeQuery),
         Box::new(Q4MakerQuery),
+        Box::new(Q5VolumeQuery),
     ];
     let scenarios = Arc::new(scenarios);
 
@@ -642,8 +713,9 @@ async fn fetch_sample_data(
 ) -> Result<Vec<SampleData>, sqlx::Error> {
     let fetch_size = limit * 3;
 
+    // Use dquery_dex database.
     let query = format!(
-        "SELECT token0_address, ts, maker FROM dex_swap_tx_solana ORDER BY ts DESC LIMIT {}",
+        "SELECT token0_address, ts, maker FROM dquery_dex.dex_swap_tx_solana LIMIT {}",
         fetch_size
     );
     let rows: Vec<SampleData> = sqlx::query_as(&query).fetch_all(pool).await?;
