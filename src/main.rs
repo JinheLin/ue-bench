@@ -35,6 +35,10 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     verify: bool,
+
+    /// Number of makers to use in query IN clause
+    #[arg(long, default_value_t = 500)]
+    maker_count: usize,
 }
 
 struct ThreadStats {
@@ -129,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stats = ThreadStats::new();
             
             while start_time.elapsed() < run_duration {
-                let result = run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify).await;
+                let result = run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, maker_count).await;
 
                 match result {
                     Ok(duration) => {
@@ -321,7 +325,8 @@ async fn run_union_query(
     data_pool: &SampleData,
     max_days_back: i64,
     verbose: bool,
-    verify: bool
+    verify: bool,
+    maker_count: usize,
 ) -> Result<Duration, sqlx::Error> {
     // Select random token0_sample and token1_sample
     let token0_sample = data_pool.token0_samples.choose(rng).expect("No token0_samples");
@@ -347,8 +352,8 @@ async fn run_union_query(
         }
     }
     
-    // Add random makers to reach 1000
-    let target_count: usize = 1000;
+    // Add random makers to reach target count
+    let target_count: usize = maker_count;
     let needed = target_count.saturating_sub(selected_makers.len());
     if needed > 0 {
         let additional_makers: Vec<String> = data_pool.makers
@@ -472,8 +477,8 @@ async fn run_union_query(
     let target_rows: Vec<UnionQueryResult> = sqlx::query_as(&target_sql).fetch_all(pool).await?;
     let duration = start.elapsed();
     
-    // Print SQL if query takes more than 500ms
-    if duration.as_millis() > 500 {
+    // Print SQL if query takes more than 1 second
+    if duration.as_millis() > 1000 {
         println!("⚠️  Slow query ({}ms):\n{}", duration.as_millis(), target_sql);
     }
 
