@@ -471,6 +471,11 @@ async fn run_union_query(
     // Execute target query
     let target_rows: Vec<UnionQueryResult> = sqlx::query_as(&target_sql).fetch_all(pool).await?;
     let duration = start.elapsed();
+    
+    // Print SQL if query takes more than 500ms
+    if duration.as_millis() > 500 {
+        println!("⚠️  Slow query ({}ms):\n{}", duration.as_millis(), target_sql);
+    }
 
     // Verify logic: compare with primary index query if verify is enabled
     if verify {
