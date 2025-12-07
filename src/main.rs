@@ -4,10 +4,11 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use sqlx::mysql::{MySqlPoolOptions, MySqlConnectOptions};
 use sqlx::{Pool, MySql, FromRow};
+use sqlx::types::BigDecimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use chrono::{Utc, Duration as ChronoDuration};
+use chrono::{DateTime, Utc, Duration as ChronoDuration};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -30,6 +31,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     verbose: bool,
+
+    #[arg(long, default_value_t = false)]
+    verify: bool,
 }
 
 struct ThreadStats {
@@ -99,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pool = pool.clone();
         let data_pool = shared_data.clone(); 
         let verbose = args.verbose;
+        let verify = args.verify;
         let max_days_back = args.days_back;
         
         let handle = tokio::spawn(async move {
@@ -106,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stats = ThreadStats::new();
             
             while start_time.elapsed() < run_duration {
-                let result = run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose).await;
+                let result = run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify).await;
 
                 match result {
                     Ok(duration) => {
@@ -182,6 +187,36 @@ struct Maker {
     maker: String,
 }
 
+/// Result structure for UNION ALL query
+#[derive(Debug, Clone, FromRow, Eq, PartialEq)]
+struct UnionQueryResult {
+    ts: DateTime<Utc>,
+    #[sqlx(rename = "type")]
+    tx_type: i8,
+    token0_address: String,
+    token1_address: Option<String>,
+    token0_symbol: Option<String>,
+    token1_symbol: Option<String>,
+    token0_volume: Option<BigDecimal>,
+    token1_volume: Option<BigDecimal>,
+    token0_price_usd: Option<BigDecimal>,
+    token1_price_usd: Option<BigDecimal>,
+    quote: Option<BigDecimal>,
+    volume: Option<BigDecimal>,
+    quote_index: Option<i8>,
+    maker: Option<String>,
+    exclude: Option<i8>,
+    factory: Option<String>,
+    tx_hash: String,
+    height: i64,
+    tx_id: Option<i64>,
+    log_id: i64,
+    #[sqlx(rename = "token0TopPools")]
+    token0_top_pools: i8,
+    #[sqlx(rename = "token1TopPools")]
+    token1_top_pools: i8,
+}
+
 async fn fetch_sample_data(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
     // Sample token0_address from dquery_dex.dex_swap_tx_solana_1206
     let query0 = format!("SELECT DISTINCT token0_address FROM dquery_dex.dex_swap_tx_solana_1206 LIMIT {}", limit);
@@ -213,7 +248,8 @@ async fn run_union_query(
     rng: &mut impl Rng, 
     data_pool: &SampleData,
     max_days_back: i64,
-    verbose: bool
+    verbose: bool,
+    verify: bool
 ) -> Result<Duration, sqlx::Error> {
     // Select random token0_address and token1_address
     let token0_addr = data_pool.token0_addresses.choose(rng).expect("No token0_addresses");
@@ -247,14 +283,16 @@ async fn run_union_query(
     let index_name = if use_desc { "idx_desc" } else { "idx_asc" };
     let sort_direction = if use_desc { "DESC" } else { "ASC" };
     
-    // Build maker IN clause
-    let maker_placeholders: Vec<String> = (0..selected_makers.len()).map(|_| "?".to_string()).collect();
-    let maker_in_clause = maker_placeholders.join(", ");
+    // Build maker IN clause with actual values
+    let makers_str = selected_makers.iter()
+        .map(|m| format!("'{}'", m.replace("'", "''")))  // Escape single quotes
+        .collect::<Vec<_>>()
+        .join(", ");
     
     let start = Instant::now();
     
-    // Build the UNION ALL query (fixed structure)
-    let query = format!(
+    // Build the base UNION ALL query template with actual values (using {} as index placeholder)
+    let base_sql = format!(
         r#"
         SELECT 
             ts, type, token0_address, token1_address, 
@@ -269,15 +307,15 @@ async fn run_union_query(
             dquery_dex_new.dex_swap_tx_solana
             USE INDEX ({})
         WHERE 
-            token0_address = ? 
-            AND platform = ? 
-            AND no_anchor = ? 
+            token0_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
             AND type = 0 
             AND maker IN ({}) 
-            AND ts >= ? 
-            AND ts <= ? 
-            AND volume >= ? 
-            AND volume <= ? 
+            AND ts >= '{}' 
+            AND ts <= '{}' 
+            AND volume >= {} 
+            AND volume <= {} 
         UNION ALL
         SELECT 
             ts, type, token0_address, token1_address, 
@@ -292,60 +330,71 @@ async fn run_union_query(
             dquery_dex.dex_swap_tx_solana_1206
             USE INDEX ({})
         WHERE 
-            token1_address = ? 
-            AND platform = ? 
-            AND no_anchor = ? 
+            token1_address = '{}' 
+            AND platform = {} 
+            AND no_anchor = {} 
             AND type = 1 
             AND maker IN ({}) 
-            AND ts >= ? 
-            AND ts <= ? 
-            AND volume >= ? 
-            AND volume <= ? 
+            AND ts >= '{}' 
+            AND ts <= '{}' 
+            AND volume >= {} 
+            AND volume <= {} 
         ORDER BY 
             ts {}, height {}, tx_id {}, log_id {} 
         LIMIT 100
         "#,
-        index_name, index_name, maker_in_clause, maker_in_clause,
+        "{}", // index placeholder for first table
+        token0_addr.replace("'", "''"), platform, no_anchor, makers_str,
+        start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
+        end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
+        volume_min, volume_max,
+        "{}", // index placeholder for second table
+        token1_addr.replace("'", "''"), platform, no_anchor, makers_str,
+        start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
+        end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
+        volume_min, volume_max,
         sort_direction, sort_direction, sort_direction, sort_direction
     );
     
-    // Build query with bindings
-    let mut query_builder = sqlx::query(&query);
+    // Build target SQL with actual index
+    let target_sql = base_sql.replace("{}", index_name);
     
-    // First SELECT: token0_address, type = 0
-    query_builder = query_builder
-        .bind(token0_addr)
-        .bind(platform)
-        .bind(no_anchor);
-    for maker in &selected_makers {
-        query_builder = query_builder.bind(maker);
-    }
-        query_builder = query_builder
-        .bind(start_limit)
-        .bind(end_limit)
-        .bind(volume_min)
-        .bind(volume_max);
+    // Build verify SQL with primary index if verify is enabled
+    let verify_sql = if verify {
+        Some(base_sql.replace("{}", "primary"))
+    } else {
+        None
+    };
     
-    // Second SELECT: token1_address, type = 1
-    query_builder = query_builder
-        .bind(token1_addr)
-        .bind(platform)
-        .bind(no_anchor);
-    for maker in &selected_makers {
-        query_builder = query_builder.bind(maker);
-    }
-    query_builder = query_builder
-        .bind(start_limit)
-        .bind(end_limit)
-        .bind(volume_min)
-        .bind(volume_max);
-    
-    let rows = query_builder.fetch_all(pool).await?;
+    // Execute target query
+    let target_rows: Vec<UnionQueryResult> = sqlx::query_as(&target_sql).fetch_all(pool).await?;
     let duration = start.elapsed();
+
+    // Verify logic: compare with primary index query if verify is enabled
+    if verify {
+        if let Some(v_sql) = verify_sql {
+            let verify_rows: Vec<UnionQueryResult> = sqlx::query_as(&v_sql).fetch_all(pool).await?;
+            
+            // Compare results: both length and content
+            if target_rows.len() != verify_rows.len() {
+                eprintln!(
+                    "❌ Verify Failed for [Union Query]: Target Rows {}, Verify Rows {}",
+                    target_rows.len(),
+                    verify_rows.len()
+                );
+                eprintln!("Target SQL (using {} index):\n{}", index_name, target_sql);
+                eprintln!("Verify SQL (using primary index):\n{}", v_sql);
+            } else if target_rows != verify_rows {
+                eprintln!("❌ Verify Failed for [Union Query]: Content Mismatch (Row count matches: {})", target_rows.len());
+                eprintln!("Target SQL (using {} index):\n{}", index_name, target_sql);
+                eprintln!("Verify SQL (using primary index):\n{}", v_sql);
+            }
+        }
+    }
 
     if verbose {
         println!("---------------------------------------------------");
-        println!("[Union Query] Time: {:?} | Rows: {}", duration.as_millis(), rows.len());
+        println!("[Union Query] Time: {:?} | Rows: {}", duration.as_millis(), target_rows.len());
         println!("Token0: {}, Token1: {}, Makers: {}, Platform: {}, NoAnchor: {}", 
             token0_addr, token1_addr, selected_makers.len(), platform, no_anchor);
         println!("TS Range: {} to {}", 
