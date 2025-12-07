@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let verbose = args.verbose;
         let verify = args.verify;
         let max_days_back = args.days_back;
+        let maker_count = args.maker_count;
         
         let handle = tokio::spawn(async move {
             let mut rng = StdRng::from_entropy();
