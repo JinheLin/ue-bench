@@ -269,19 +269,28 @@ fn save_sample_data_to_cache(data: &SampleData) -> Result<(), Box<dyn std::error
 
 async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
     // Sample token0_address from dquery_dex.dex_swap_tx_solana_1206
+    println!("> [1/3] Sampling token0_addresses from dquery_dex.dex_swap_tx_solana_1206...");
     let query0 = format!("SELECT DISTINCT token0_address FROM dquery_dex.dex_swap_tx_solana_1206 LIMIT {}", limit);
+    println!("  SQL: {}", query0);
     let token0_rows: Vec<TokenAddress> = sqlx::query_as(&query0).fetch_all(pool).await?;
     let token0_addresses: Vec<String> = token0_rows.into_iter().map(|r| r.token0_address).collect();
+    println!("  Result: {} token0_addresses", token0_addresses.len());
     
     // Sample token1_address from dquery_dex_new.dex_swap_tx_solana
+    println!("> [2/3] Sampling token1_addresses from dquery_dex_new.dex_swap_tx_solana...");
     let query1 = format!("SELECT DISTINCT token1_address FROM dquery_dex_new.dex_swap_tx_solana LIMIT {}", limit);
+    println!("  SQL: {}", query1);
     let token1_rows: Vec<Token1Address> = sqlx::query_as(&query1).fetch_all(pool).await?;
     let token1_addresses: Vec<String> = token1_rows.into_iter().map(|r| r.token1_address).collect();
+    println!("  Result: {} token1_addresses", token1_addresses.len());
     
     // Sample maker from dquery_dex.dex_swap_tx_solana_1206
+    println!("> [3/3] Sampling makers from dquery_dex.dex_swap_tx_solana_1206...");
     let query_maker = format!("SELECT DISTINCT maker FROM dquery_dex.dex_swap_tx_solana_1206 WHERE maker IS NOT NULL AND maker != '' LIMIT {}", limit);
+    println!("  SQL: {}", query_maker);
     let maker_rows: Vec<Maker> = sqlx::query_as(&query_maker).fetch_all(pool).await?;
     let makers: Vec<String> = maker_rows.into_iter().map(|r| r.maker).collect();
+    println!("  Result: {} makers", makers.len());
     
     Ok(SampleData {
         token0_addresses,
