@@ -1831,6 +1831,8 @@ dependencies = [
  "clap",
  "futures",
  "rand",
+ "serde",
+ "serde_json",
  "sqlx",
  "tokio",
 ]

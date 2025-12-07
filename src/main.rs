@@ -8,7 +8,10 @@ use sqlx::types::BigDecimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::fs;
+use std::path::Path;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -50,12 +53,14 @@ impl ThreadStats {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SampleData {
     token0_addresses: Vec<String>,
     token1_addresses: Vec<String>,
     makers: Vec<String>,
 }
+
+const CACHE_FILE: &str = "sample_data_cache.json";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,9 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    println!("> Sampling {} token0_addresses from dquery_dex.dex_swap_tx_solana_1206...", args.sample_size);
-    println!("> Sampling {} token1_addresses from dquery_dex_new.dex_swap_tx_solana...", args.sample_size);
-    println!("> Sampling {} makers from database...", args.sample_size);
+    println!("> Checking for cached sample data (required: {})...", args.sample_size);
     let sampled_data = fetch_sample_data(&pool, args.sample_size).await?;
     
     if sampled_data.token0_addresses.is_empty() || sampled_data.token1_addresses.is_empty() || sampled_data.makers.is_empty() {
@@ -217,7 +220,54 @@ struct UnionQueryResult {
     token1_top_pools: i8,
 }
 
-async fn fetch_sample_data(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
+fn load_sample_data_from_cache(required_size: usize) -> Option<SampleData> {
+    if !Path::new(CACHE_FILE).exists() {
+        return None;
+    }
+    
+    match fs::read_to_string(CACHE_FILE) {
+        Ok(content) => {
+            match serde_json::from_str::<SampleData>(&content) {
+                Ok(data) => {
+                    // Check if cached data meets the requirements
+                    if data.token0_addresses.len() >= required_size 
+                        && data.token1_addresses.len() >= required_size 
+                        && data.makers.len() >= required_size {
+                        println!("> Loaded {} token0_addresses, {} token1_addresses, {} makers from cache.", 
+                            data.token0_addresses.len(), 
+                            data.token1_addresses.len(), 
+                            data.makers.len());
+                        Some(data)
+                    } else {
+                        println!("> Cache exists but insufficient (need {}): token0={}, token1={}, makers={}", 
+                            required_size,
+                            data.token0_addresses.len(),
+                            data.token1_addresses.len(),
+                            data.makers.len());
+                        None
+                    }
+                }
+                Err(e) => {
+                    eprintln!("> Warning: Failed to parse cache file: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("> Warning: Failed to read cache file: {}", e);
+            None
+        }
+    }
+}
+
+fn save_sample_data_to_cache(data: &SampleData) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string_pretty(data)?;
+    fs::write(CACHE_FILE, json)?;
+    println!("> Saved sample data to cache file: {}", CACHE_FILE);
+    Ok(())
+}
+
+async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
     // Sample token0_address from dquery_dex.dex_swap_tx_solana_1206
     let query0 = format!("SELECT DISTINCT token0_address FROM dquery_dex.dex_swap_tx_solana_1206 LIMIT {}", limit);
     let token0_rows: Vec<TokenAddress> = sqlx::query_as(&query0).fetch_all(pool).await?;
@@ -238,6 +288,24 @@ async fn fetch_sample_data(pool: &Pool<MySql>, limit: usize) -> Result<SampleDat
         token1_addresses,
         makers,
     })
+}
+
+async fn fetch_sample_data(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, Box<dyn std::error::Error>> {
+    // Try to load from cache first
+    if let Some(cached_data) = load_sample_data_from_cache(limit) {
+        return Ok(cached_data);
+    }
+    
+    // Cache not available or insufficient, fetch from database
+    println!("> Fetching sample data from database...");
+    let data = fetch_sample_data_from_db(pool, limit).await?;
+    
+    // Save to cache
+    if let Err(e) = save_sample_data_to_cache(&data) {
+        eprintln!("> Warning: Failed to save cache: {}", e);
+    }
+    
+    Ok(data)
 }
 
 
