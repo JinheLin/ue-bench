@@ -286,7 +286,7 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
     
     // Sample maker from dquery_dex.dex_swap_tx_solana_1206
     println!("> [3/3] Sampling makers from dquery_dex.dex_swap_tx_solana_1206...");
-    let query_maker = format!("SELECT DISTINCT maker FROM dquery_dex.dex_swap_tx_solana_1206 WHERE maker IS NOT NULL AND maker != '' LIMIT {}", limit);
+    let query_maker = format!("SELECT maker FROM dquery_dex.dex_swap_tx_solana_1206 WHERE maker IS NOT NULL AND maker != '' GROUP BY maker LIMIT {}", limit);
     println!("  SQL: {}", query_maker);
     let maker_rows: Vec<Maker> = sqlx::query_as(&query_maker).fetch_all(pool).await?;
     let makers: Vec<String> = maker_rows.into_iter().map(|r| r.maker).collect();
@@ -295,7 +295,7 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
     Ok(SampleData {
         token0_addresses,
         token1_addresses,
-        makers,
+        makers: makers,
     })
 }
 
