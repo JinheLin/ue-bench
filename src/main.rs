@@ -248,30 +248,58 @@ struct UnionQueryResult {
 
 async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
     // Sample token0_address with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206
+    // Sample more rows than needed, then deduplicate by token0_address in application layer
     println!("> [1/3] Sampling token0_addresses with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206...");
-    let query0 = format!("SELECT token0_address, ts, volume, maker FROM dquery_dex.dex_swap_tx_solana_1206 TABLESAMPLE REGIONS() WHERE token0_address IS NOT NULL LIMIT {}", limit);
+    let sample_limit = limit * 3; // Sample 3x to account for duplicates
+    let query0 = format!("SELECT token0_address, ts, volume, maker FROM dquery_dex.dex_swap_tx_solana_1206 TABLESAMPLE REGIONS() WHERE token0_address IS NOT NULL LIMIT {}", sample_limit);
     println!("  SQL: {}", query0);
     let token0_rows: Vec<Token0Row> = sqlx::query_as(&query0).fetch_all(pool).await?;
-    let token0_samples: Vec<Token0Sample> = token0_rows.into_iter().map(|r| Token0Sample {
-        token0_address: r.token0_address,
-        ts: r.ts,
-        volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
-        maker: r.maker,
-    }).collect();
-    println!("  Result: {} token0_samples", token0_samples.len());
+    
+    // Deduplicate by token0_address, keeping first occurrence
+    let mut seen = std::collections::HashSet::new();
+    let token0_samples: Vec<Token0Sample> = token0_rows.into_iter()
+        .filter_map(|r| {
+            if seen.insert(r.token0_address.clone()) {
+                Some(Token0Sample {
+                    token0_address: r.token0_address,
+                    ts: r.ts,
+                    volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
+                    maker: r.maker,
+                })
+            } else {
+                None
+            }
+        })
+        .take(limit)
+        .collect();
+    println!("  Result: {} distinct token0_samples (after deduplication)", token0_samples.len());
     
     // Sample token1_address with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana
+    // Sample more rows than needed, then deduplicate by token1_address in application layer
     println!("> [2/3] Sampling token1_addresses with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana...");
-    let query1 = format!("SELECT token1_address, ts, volume, maker FROM dquery_dex_new.dex_swap_tx_solana TABLESAMPLE REGIONS() WHERE token1_address IS NOT NULL LIMIT {}", limit);
+    let sample_limit = limit * 3; // Sample 3x to account for duplicates
+    let query1 = format!("SELECT token1_address, ts, volume, maker FROM dquery_dex_new.dex_swap_tx_solana TABLESAMPLE REGIONS() WHERE token1_address IS NOT NULL LIMIT {}", sample_limit);
     println!("  SQL: {}", query1);
     let token1_rows: Vec<Token1Row> = sqlx::query_as(&query1).fetch_all(pool).await?;
-    let token1_samples: Vec<Token1Sample> = token1_rows.into_iter().map(|r| Token1Sample {
-        token1_address: r.token1_address,
-        ts: r.ts,
-        volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
-        maker: r.maker,
-    }).collect();
-    println!("  Result: {} token1_samples", token1_samples.len());
+    
+    // Deduplicate by token1_address, keeping first occurrence
+    let mut seen = std::collections::HashSet::new();
+    let token1_samples: Vec<Token1Sample> = token1_rows.into_iter()
+        .filter_map(|r| {
+            if seen.insert(r.token1_address.clone()) {
+                Some(Token1Sample {
+                    token1_address: r.token1_address,
+                    ts: r.ts,
+                    volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
+                    maker: r.maker,
+                })
+            } else {
+                None
+            }
+        })
+        .take(limit)
+        .collect();
+    println!("  Result: {} distinct token1_samples (after deduplication)", token1_samples.len());
     
     // Collect all makers from samples and additional sampling to reach 1000
     println!("> [3/3] Collecting makers from samples and additional sampling...");
