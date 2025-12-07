@@ -485,7 +485,15 @@ async fn run_union_query(
     // Verify logic: compare with primary index query if verify is enabled
     if verify {
         if let Some(v_sql) = verify_sql {
+            let verify_start = Instant::now();
             let verify_rows: Vec<UnionQueryResult> = sqlx::query_as(&v_sql).fetch_all(pool).await?;
+            let verify_duration = verify_start.elapsed();
+            
+            // Print verify query log
+            println!("[Verify Query] Latency: {}ms | Rows: {} | Index: primary", 
+                verify_duration.as_millis(),
+                verify_rows.len()
+            );
             
             // Compare results: both length and content
             if target_rows.len() != verify_rows.len() {
@@ -500,20 +508,31 @@ async fn run_union_query(
                 eprintln!("❌ Verify Failed for [Union Query]: Content Mismatch (Row count matches: {})", target_rows.len());
                 eprintln!("Target SQL (using {} index):\n{}", index_name, target_sql);
                 eprintln!("Verify SQL (using primary index):\n{}", v_sql);
+            } else {
+                println!("✅ Verify Passed: Rows match ({}), Content match", verify_rows.len());
             }
         }
     }
 
+    // Always print query log (not just in verbose mode)
+    println!("[Union Query] Latency: {}ms | Rows: {} | Token: {} | Makers: {} | Platform: {} | NoAnchor: {} | TS: {} to {} | Volume: {} to {} | Sort: {} | Index: {}", 
+        duration.as_millis(),
+        target_rows.len(),
+        token_addr,
+        selected_makers.len(),
+        platform,
+        no_anchor,
+        start_limit.format("%Y-%m-%d %H:%M:%S"),
+        end_limit.format("%Y-%m-%d %H:%M:%S"),
+        volume_min,
+        volume_max,
+        sort_direction,
+        index_name
+    );
+    
+    // Print full SQL in verbose mode
     if verbose {
-        println!("---------------------------------------------------");
-        println!("[Union Query] Time: {:?} | Rows: {}", duration.as_millis(), target_rows.len());
-        println!("Token: {}, Makers: {}, Platform: {}, NoAnchor: {}", 
-            token_addr, selected_makers.len(), platform, no_anchor);
-        println!("TS Range: {} to {}", 
-            start_limit.format("%Y-%m-%d %H:%M:%S"), 
-            end_limit.format("%Y-%m-%d %H:%M:%S"));
-        println!("Volume Range: {} to {}", volume_min, volume_max);
-        println!("Sort Direction: {}, Index: {}", sort_direction, index_name);
+        println!("  Full SQL:\n{}", target_sql);
     }
     Ok(duration)
 }
