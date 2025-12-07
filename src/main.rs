@@ -415,7 +415,7 @@ async fn run_union_query(
     }
     
     // Add random makers to reach 1000
-    let target_count = 1000;
+    let target_count: usize = 1000;
     let needed = target_count.saturating_sub(selected_makers.len());
     if needed > 0 {
         let additional_makers: Vec<String> = data_pool.makers
