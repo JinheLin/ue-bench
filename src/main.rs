@@ -56,17 +56,8 @@ impl ThreadStats {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Token0Sample {
-    token0_address: String,
-    #[serde(with = "chrono::serde::ts_seconds")]
-    ts: DateTime<Utc>,
-    volume: Option<f64>,
-    maker: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Token1Sample {
-    token1_address: String,
+struct TokenSample {
+    token_address: String,
     #[serde(with = "chrono::serde::ts_seconds")]
     ts: DateTime<Utc>,
     volume: Option<f64>,
@@ -75,8 +66,7 @@ struct Token1Sample {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SampleData {
-    token0_samples: Vec<Token0Sample>,
-    token1_samples: Vec<Token1Sample>,
+    token_samples: Vec<TokenSample>,
     makers: Vec<String>,
 }
 
@@ -106,13 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("> Fetching sample data from database (required: {})...", args.sample_size);
     let sampled_data = fetch_sample_data_from_db(&pool, args.sample_size).await?;
     
-    if sampled_data.token0_samples.is_empty() || sampled_data.token1_samples.is_empty() || sampled_data.makers.is_empty() {
+    if sampled_data.token_samples.is_empty() || sampled_data.makers.is_empty() {
         eprintln!("❌ Error: Failed to sample data from tables.");
         return Ok(());
     }
-    println!("> Successfully loaded {} token0_samples, {} token1_samples, {} makers.", 
-        sampled_data.token0_samples.len(), 
-        sampled_data.token1_samples.len(), 
+    println!("> Successfully loaded {} token_samples, {} makers.", 
+        sampled_data.token_samples.len(), 
         sampled_data.makers.len());
 
     let shared_data = Arc::new(sampled_data);
@@ -248,7 +237,6 @@ struct UnionQueryResult {
 
 async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
     // Sample token0_address with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206
-    // Sample more rows than needed, then deduplicate by token0_address in application layer
     println!("> [1/3] Sampling token0_addresses with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206...");
     let sample_limit = limit * 3; // Sample 3x to account for duplicates
     let query0 = format!("SELECT token0_address, ts, volume, maker FROM dquery_dex.dex_swap_tx_solana_1206 TABLESAMPLE REGIONS() WHERE token0_address IS NOT NULL LIMIT {}", sample_limit);
@@ -257,11 +245,11 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
     
     // Deduplicate by token0_address, keeping first occurrence
     let mut seen = std::collections::HashSet::new();
-    let token0_samples: Vec<Token0Sample> = token0_rows.into_iter()
+    let token0_samples: Vec<TokenSample> = token0_rows.into_iter()
         .filter_map(|r| {
             if seen.insert(r.token0_address.clone()) {
-                Some(Token0Sample {
-                    token0_address: r.token0_address,
+                Some(TokenSample {
+                    token_address: r.token0_address,
                     ts: r.ts,
                     volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
                     maker: r.maker,
@@ -275,20 +263,18 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
     println!("  Result: {} distinct token0_samples (after deduplication)", token0_samples.len());
     
     // Sample token1_address with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana
-    // Sample more rows than needed, then deduplicate by token1_address in application layer
     println!("> [2/3] Sampling token1_addresses with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana...");
-    let sample_limit = limit * 3; // Sample 3x to account for duplicates
     let query1 = format!("SELECT token1_address, ts, volume, maker FROM dquery_dex_new.dex_swap_tx_solana TABLESAMPLE REGIONS() WHERE token1_address IS NOT NULL LIMIT {}", sample_limit);
     println!("  SQL: {}", query1);
     let token1_rows: Vec<Token1Row> = sqlx::query_as(&query1).fetch_all(pool).await?;
     
     // Deduplicate by token1_address, keeping first occurrence
     let mut seen = std::collections::HashSet::new();
-    let token1_samples: Vec<Token1Sample> = token1_rows.into_iter()
+    let token1_samples: Vec<TokenSample> = token1_rows.into_iter()
         .filter_map(|r| {
             if seen.insert(r.token1_address.clone()) {
-                Some(Token1Sample {
-                    token1_address: r.token1_address,
+                Some(TokenSample {
+                    token_address: r.token1_address,
                     ts: r.ts,
                     volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
                     maker: r.maker,
@@ -301,21 +287,17 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
         .collect();
     println!("  Result: {} distinct token1_samples (after deduplication)", token1_samples.len());
     
+    // Combine token0_samples and token1_samples into a single list
+    let mut token_samples = token0_samples;
+    token_samples.extend(token1_samples);
+    println!("  Combined: {} total token_samples", token_samples.len());
+    
     // Collect all makers from samples and additional sampling to reach 1000
     println!("> [3/3] Collecting makers from samples and additional sampling...");
     let mut maker_set = std::collections::HashSet::new();
     
-    // Collect makers from token0_samples
-    for sample in &token0_samples {
-        if let Some(ref m) = sample.maker {
-            if !m.is_empty() {
-                maker_set.insert(m.clone());
-            }
-        }
-    }
-    
-    // Collect makers from token1_samples
-    for sample in &token1_samples {
+    // Collect makers from token_samples
+    for sample in &token_samples {
         if let Some(ref m) = sample.maker {
             if !m.is_empty() {
                 maker_set.insert(m.clone());
@@ -338,8 +320,7 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
     println!("  Result: {} total makers", makers.len());
     
     Ok(SampleData {
-        token0_samples,
-        token1_samples,
+        token_samples,
         makers,
     })
 }
@@ -357,25 +338,15 @@ async fn run_union_query(
     verify: bool,
     maker_count: usize,
 ) -> Result<Duration, sqlx::Error> {
-    // Select random token0_sample and token1_sample
-    let token0_sample = data_pool.token0_samples.choose(rng).expect("No token0_samples");
-    let token1_sample = data_pool.token1_samples.choose(rng).expect("No token1_samples");
+    // Select random token sample - same address will be used for both token0 and token1
+    let token_sample = data_pool.token_samples.choose(rng).expect("No token_samples");
+    let token_addr = &token_sample.token_address;
     
-    let token0_addr = &token0_sample.token0_address;
-    let token1_addr = &token1_sample.token1_address;
-    
-    // Collect makers: from samples + random selection to reach 1000
+    // Collect makers: from sample + random selection to reach target count
     let mut selected_makers = std::collections::HashSet::new();
     
-    // Add maker from token0_sample if exists
-    if let Some(ref m) = token0_sample.maker {
-        if !m.is_empty() {
-            selected_makers.insert(m.clone());
-        }
-    }
-    
-    // Add maker from token1_sample if exists
-    if let Some(ref m) = token1_sample.maker {
+    // Add maker from token_sample if exists
+    if let Some(ref m) = token_sample.maker {
         if !m.is_empty() {
             selected_makers.insert(m.clone());
         }
@@ -396,20 +367,20 @@ async fn run_union_query(
     
     let selected_makers: Vec<String> = selected_makers.into_iter().collect();
     
-    // Fixed conditions
+    // Fixed conditions (same for both UNION parts)
     let platform = 16;
     let no_anchor: i8 = 0; // false
     
-    // Random time range using days_back, based on sampled ts
-    let base_ts = token0_sample.ts; // Use token0's ts as base
+    // Random time range using days_back, based on sampled ts (same for both UNION parts)
+    let base_ts = token_sample.ts;
     let window_days = rng.gen_range(1..=max_days_back);
     let window_seconds = window_days * 86400;
     let offset_seconds = rng.gen_range(0..window_seconds);
     let start_limit = base_ts - ChronoDuration::seconds(offset_seconds);
     let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
     
-    // Random volume range, based on sampled volume
-    let base_volume = token0_sample.volume.unwrap_or(1000.0);
+    // Random volume range, based on sampled volume (same for both UNION parts)
+    let base_volume = token_sample.volume.unwrap_or(1000.0);
     let volume_variance = base_volume * 0.5; // 50% variance
     let volume_min = (base_volume - volume_variance).max(1.0);
     let volume_max = base_volume + volume_variance + rng.gen_range(1.0..10000.0);
@@ -480,12 +451,12 @@ async fn run_union_query(
         LIMIT 100
         "#,
         "{}", // index placeholder for first table
-        token0_addr.replace("'", "''"), platform, no_anchor, makers_str,
+        token_addr.replace("'", "''"), platform, no_anchor, makers_str,
         start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         volume_min, volume_max,
         "{}", // index placeholder for second table
-        token1_addr.replace("'", "''"), platform, no_anchor, makers_str,
+        token_addr.replace("'", "''"), platform, no_anchor, makers_str,
         start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         volume_min, volume_max,
@@ -536,8 +507,8 @@ async fn run_union_query(
     if verbose {
         println!("---------------------------------------------------");
         println!("[Union Query] Time: {:?} | Rows: {}", duration.as_millis(), target_rows.len());
-        println!("Token0: {}, Token1: {}, Makers: {}, Platform: {}, NoAnchor: {}", 
-            token0_addr, token1_addr, selected_makers.len(), platform, no_anchor);
+        println!("Token: {}, Makers: {}, Platform: {}, NoAnchor: {}", 
+            token_addr, selected_makers.len(), platform, no_anchor);
         println!("TS Range: {} to {}", 
             start_limit.format("%Y-%m-%d %H:%M:%S"), 
             end_limit.format("%Y-%m-%d %H:%M:%S"));
