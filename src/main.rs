@@ -39,6 +39,10 @@ struct Args {
     /// Number of makers to use in query IN clause
     #[arg(long, default_value_t = 500)]
     maker_count: usize,
+
+    /// Query type to run (1-10)
+    #[arg(long, default_value_t = 1)]
+    query: u8,
 }
 
 struct ThreadStats {
@@ -62,6 +66,9 @@ struct TokenSample {
     ts: DateTime<Utc>,
     volume: Option<f64>,
     maker: Option<String>,
+    height: i64,
+    tx_id: Option<i64>,
+    log_id: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,7 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!("❌ --days-back must be at least 1");
     }
 
-    println!("--- Starting Solana DEX Benchmark (UNION ALL Query) ---");
+    if args.query < 1 || args.query > 10 {
+        panic!("❌ --query must be between 1 and 10");
+    }
+
+    println!("--- Starting Solana DEX Benchmark (UNION ALL Query {}) ---", args.query);
     println!("Concurrency: {}", args.concurrency);
     println!("Sample Size: {}", args.sample_size);
     println!("Max Days Back: {}", args.days_back);
@@ -117,13 +128,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let verify = args.verify;
         let max_days_back = args.days_back;
         let maker_count = args.maker_count;
+        let query_type = args.query;
         
         let handle = tokio::spawn(async move {
             let mut rng = StdRng::from_entropy();
             let mut stats = ThreadStats::new();
             
             while start_time.elapsed() < run_duration {
-                let result = run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, maker_count).await;
+                let result = if query_type == 1 {
+                    // Query 1: use original function
+                    run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, maker_count).await
+                } else {
+                    // Query 2-10: use new function
+                    run_union_query_v2(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, query_type).await
+                };
 
                 match result {
                     Ok(duration) => {
@@ -161,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("QPS: {:.2}", qps);
 
     println!("\n--- ⏱️  Latency Statistics (ms) ---");
-    print_percentiles("Union Query", &mut all_latencies);
+    print_percentiles(&format!("Union Query {}", args.query), &mut all_latencies);
 
     Ok(())
 }
@@ -190,6 +208,9 @@ struct Token0Row {
     ts: DateTime<Utc>,
     volume: Option<BigDecimal>,
     maker: Option<String>,
+    height: i64,
+    tx_id: Option<i64>,
+    log_id: i64,
 }
 
 #[derive(FromRow)]
@@ -198,6 +219,9 @@ struct Token1Row {
     ts: DateTime<Utc>,
     volume: Option<BigDecimal>,
     maker: Option<String>,
+    height: i64,
+    tx_id: Option<i64>,
+    log_id: i64,
 }
 
 #[derive(FromRow)]
@@ -205,7 +229,7 @@ struct Maker {
     maker: String,
 }
 
-/// Result structure for UNION ALL query
+/// Result structure for UNION ALL query (Query 1 - without position_type)
 #[derive(Debug, Clone, FromRow, Eq, PartialEq)]
 struct UnionQueryResult {
     ts: DateTime<Utc>,
@@ -235,11 +259,43 @@ struct UnionQueryResult {
     token1_top_pools: i8,
 }
 
+/// Result structure for UNION ALL query (Query 2-10 - with position_type)
+#[derive(Debug, Clone, FromRow, Eq, PartialEq)]
+struct UnionQueryResultWithPosition {
+    ts: DateTime<Utc>,
+    #[sqlx(rename = "type")]
+    tx_type: i8,
+    token0_address: String,
+    token1_address: Option<String>,
+    token0_symbol: Option<String>,
+    token1_symbol: Option<String>,
+    token0_volume: Option<BigDecimal>,
+    token1_volume: Option<BigDecimal>,
+    token0_price_usd: Option<BigDecimal>,
+    token1_price_usd: Option<BigDecimal>,
+    quote: Option<BigDecimal>,
+    volume: Option<BigDecimal>,
+    quote_index: Option<i8>,
+    maker: Option<String>,
+    exclude: Option<i8>,
+    factory: Option<String>,
+    tx_hash: String,
+    height: i64,
+    tx_id: Option<i64>,
+    log_id: i64,
+    #[sqlx(rename = "token0toppools")]
+    token0_top_pools: i8,
+    #[sqlx(rename = "token1toppools")]
+    token1_top_pools: i8,
+    token0_position_type: Option<i8>,
+    token1_position_type: Option<i8>,
+}
+
 async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<SampleData, sqlx::Error> {
-    // Sample token0_address with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206
-    println!("> [1/3] Sampling token0_addresses with ts, volume, maker from dquery_dex.dex_swap_tx_solana_1206...");
+    // Sample token0_address with ts, volume, maker, height, tx_id, log_id from dquery_dex.dex_swap_tx_solana_1206
+    println!("> [1/3] Sampling token0_addresses with ts, volume, maker, height, tx_id, log_id from dquery_dex.dex_swap_tx_solana_1206...");
     let sample_limit = limit * 3; // Sample 3x to account for duplicates
-    let query0 = format!("SELECT token0_address, ts, volume, maker FROM dquery_dex.dex_swap_tx_solana_1206 TABLESAMPLE REGIONS() WHERE token0_address IS NOT NULL LIMIT {}", sample_limit);
+    let query0 = format!("SELECT token0_address, ts, volume, maker, height, tx_id, log_id FROM dquery_dex.dex_swap_tx_solana_1206 TABLESAMPLE REGIONS() WHERE token0_address IS NOT NULL LIMIT {}", sample_limit);
     println!("  SQL: {}", query0);
     let token0_rows: Vec<Token0Row> = sqlx::query_as(&query0).fetch_all(pool).await?;
     
@@ -253,6 +309,9 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
                     ts: r.ts,
                     volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
                     maker: r.maker,
+                    height: r.height,
+                    tx_id: r.tx_id,
+                    log_id: r.log_id,
                 })
             } else {
                 None
@@ -262,9 +321,9 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
         .collect();
     println!("  Result: {} distinct token0_samples (after deduplication)", token0_samples.len());
     
-    // Sample token1_address with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana
-    println!("> [2/3] Sampling token1_addresses with ts, volume, maker from dquery_dex_new.dex_swap_tx_solana...");
-    let query1 = format!("SELECT token1_address, ts, volume, maker FROM dquery_dex_new.dex_swap_tx_solana TABLESAMPLE REGIONS() WHERE token1_address IS NOT NULL LIMIT {}", sample_limit);
+    // Sample token1_address with ts, volume, maker, height, tx_id, log_id from dquery_dex_new.dex_swap_tx_solana
+    println!("> [2/3] Sampling token1_addresses with ts, volume, maker, height, tx_id, log_id from dquery_dex_new.dex_swap_tx_solana...");
+    let query1 = format!("SELECT token1_address, ts, volume, maker, height, tx_id, log_id FROM dquery_dex_new.dex_swap_tx_solana TABLESAMPLE REGIONS() WHERE token1_address IS NOT NULL LIMIT {}", sample_limit);
     println!("  SQL: {}", query1);
     let token1_rows: Vec<Token1Row> = sqlx::query_as(&query1).fetch_all(pool).await?;
     
@@ -278,6 +337,9 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
                     ts: r.ts,
                     volume: r.volume.as_ref().and_then(|v| v.to_string().parse::<f64>().ok()),
                     maker: r.maker,
+                    height: r.height,
+                    tx_id: r.tx_id,
+                    log_id: r.log_id,
                 })
             } else {
                 None
@@ -328,6 +390,58 @@ async fn fetch_sample_data_from_db(pool: &Pool<MySql>, limit: usize) -> Result<S
 
 
 // --- SQL Queries ---
+
+/// Generate cursor condition for range queries
+/// Based on sampled token data, generate (ts, height, tx_id, log_id) with random offset
+fn generate_cursor_condition(
+    token_sample: &TokenSample,
+    rng: &mut impl Rng,
+    use_less_than: bool, // true for <, false for >
+) -> String {
+    // Generate random offsets (left/right random)
+    let ts_offset_seconds = rng.gen_range(-86400..86400); // ±1 day
+    let height_offset = rng.gen_range(-1000..1000);
+    let tx_id_offset = rng.gen_range(-100..100);
+    let log_id_offset = rng.gen_range(-50..50);
+    
+    let cursor_ts = if use_less_than {
+        token_sample.ts - ChronoDuration::seconds(ts_offset_seconds.abs())
+    } else {
+        token_sample.ts + ChronoDuration::seconds(ts_offset_seconds.abs())
+    };
+    
+    let cursor_height = if use_less_than {
+        token_sample.height.saturating_sub(height_offset.abs())
+    } else {
+        token_sample.height.saturating_add(height_offset.abs())
+    };
+    
+    let cursor_tx_id = if use_less_than {
+        token_sample.tx_id.map(|id| id.saturating_sub(tx_id_offset.abs()))
+    } else {
+        token_sample.tx_id.map(|id| id.saturating_add(tx_id_offset.abs()))
+    };
+    
+    let cursor_log_id = if use_less_than {
+        token_sample.log_id.saturating_sub(log_id_offset.abs())
+    } else {
+        token_sample.log_id.saturating_add(log_id_offset.abs())
+    };
+    
+    let tx_id_str = if let Some(tx_id) = cursor_tx_id {
+        tx_id.to_string()
+    } else {
+        "NULL".to_string()
+    };
+    
+    format!(
+        "('{}', {}, {}, {})",
+        cursor_ts.format("%Y-%m-%d %H:%M:%S%.3f"),
+        cursor_height,
+        tx_id_str,
+        cursor_log_id
+    )
+}
 
 async fn run_union_query(
     pool: &Pool<MySql>, 
@@ -534,5 +648,276 @@ async fn run_union_query(
     if verbose {
         println!("  Full SQL:\n{}", target_sql);
     }
+    Ok(duration)
+}
+
+/// Run UNION ALL query for Query 2-10 (with position_type fields)
+async fn run_union_query_v2(
+    pool: &Pool<MySql>, 
+    rng: &mut impl Rng, 
+    data_pool: &SampleData,
+    max_days_back: i64,
+    verbose: bool,
+    verify: bool,
+    query_type: u8,
+) -> Result<Duration, sqlx::Error> {
+    // Select random token sample - same address will be used for both token0 and token1
+    let token_sample = data_pool.token_samples.choose(rng).expect("No token_samples");
+    let token_addr = &token_sample.token_address;
+    
+    // Fixed conditions (same for both UNION parts)
+    let platform = 16;
+    let no_anchor: i8 = 0; // false
+    
+    // Random time range using days_back, based on sampled ts (same for both UNION parts)
+    let base_ts = token_sample.ts;
+    let window_days = rng.gen_range(1..=max_days_back);
+    let window_seconds = window_days * 86400;
+    let offset_seconds = rng.gen_range(0..window_seconds);
+    let start_limit = base_ts - ChronoDuration::seconds(offset_seconds);
+    let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
+    
+    // Random volume range, based on sampled volume (same for both UNION parts)
+    let base_volume = token_sample.volume.unwrap_or(1000.0);
+    let volume_variance = base_volume * 0.5; // 50% variance
+    let volume_min = (base_volume - volume_variance).max(1.0);
+    let volume_max = base_volume + volume_variance + rng.gen_range(1.0..10000.0);
+    
+    // Determine ORDER BY direction based on query type
+    let (use_desc, sort_direction) = match query_type {
+        5 | 8 => (false, "ASC"),
+        _ => (true, "DESC"),
+    };
+    let index_name = if use_desc { "idx_desc" } else { "idx_asc" };
+    
+    // Select single maker for queries that need it (4, 6, 10)
+    let single_maker = if matches!(query_type, 4 | 6 | 10) {
+        // Use maker from token_sample if exists, otherwise random from pool
+        if let Some(ref m) = token_sample.maker {
+            if !m.is_empty() {
+                Some(m.clone())
+            } else {
+                data_pool.makers.choose(rng).cloned()
+            }
+        } else {
+            data_pool.makers.choose(rng).cloned()
+        }
+    } else {
+        None
+    };
+    
+    // Generate cursor condition for queries that need it (3, 5, 6, 9, 10)
+    let cursor_condition = match query_type {
+        3 | 6 | 9 | 10 => Some(generate_cursor_condition(token_sample, rng, true)), // <
+        5 => Some(generate_cursor_condition(token_sample, rng, false)), // >
+        _ => None,
+    };
+    
+    let start = Instant::now();
+    
+    // Build WHERE conditions for first SELECT (token0_address)
+    let mut where0_conditions = vec![
+        format!("`token0_address` = '{}'", token_addr.replace("'", "''")),
+        format!("`platform` = {}", platform),
+        format!("`no_anchor` = false"),
+        format!("`ts` >= '{}'", start_limit.format("%Y-%m-%d %H:%M:%S%.3f")),
+        format!("`ts` <= '{}'", end_limit.format("%Y-%m-%d %H:%M:%S%.3f")),
+    ];
+    
+    // Add maker condition for queries 4, 6, 10
+    if let Some(ref maker) = single_maker {
+        where0_conditions.push(format!("`maker` = '{}'", maker.replace("'", "''")));
+    }
+    
+    // Add volume condition for queries 7, 9, 10
+    if matches!(query_type, 7 | 9 | 10) {
+        where0_conditions.push(format!("`volume` >= {}", volume_min));
+    }
+    
+    // Add cursor condition for queries 3, 5, 6, 9, 10
+    if let Some(ref cursor) = cursor_condition {
+        let operator = if query_type == 5 { ">" } else { "<" };
+        where0_conditions.push(format!("(`ts`, `height`, `tx_id`, `log_id`) {} {}", operator, cursor));
+    }
+    
+    // Build WHERE conditions for second SELECT (token1_address) - same as first
+    let where1_conditions = where0_conditions.clone()
+        .into_iter()
+        .map(|c| c.replace("`token0_address`", "`token1_address`"))
+        .collect::<Vec<_>>();
+    
+    let where0_clause = where0_conditions.join("\n            AND ");
+    let where1_clause = where1_conditions.join("\n            AND ");
+    
+    // Build the UNION ALL query
+    let base_sql = format!(
+        r#"
+        SELECT
+          `ts`,
+          TYPE,
+          `token0_address`,
+          `token1_address`,
+          `token0_symbol`,
+          `token1_symbol`,
+          `token0_volume`,
+          `token1_volume`,
+          `token0_price_usd`,
+          `token1_price_usd`,
+          `quote`,
+          `volume`,
+          `quote_index`,
+          `maker`,
+          `exclude`,
+          `factory`,
+          `tx_hash`,
+          `height`,
+          `tx_id`,
+          `log_id`,
+          `t0top` AS `token0toppools`,
+          `t1top` AS `token1toppools`,
+          `token0_position_type`,
+          `token1_position_type`
+        FROM
+          `dquery_dex_new`.`dex_swap_tx_solana`
+          USE INDEX ({})
+        WHERE
+          {}
+        UNION
+        ALL
+        SELECT
+          `ts`,
+          TYPE,
+          `token0_address`,
+          `token1_address`,
+          `token0_symbol`,
+          `token1_symbol`,
+          `token0_volume`,
+          `token1_volume`,
+          `token0_price_usd`,
+          `token1_price_usd`,
+          `quote`,
+          `volume`,
+          `quote_index`,
+          `maker`,
+          `exclude`,
+          `factory`,
+          `tx_hash`,
+          `height`,
+          `tx_id`,
+          `log_id`,
+          `t0top` AS `token0toppools`,
+          `t1top` AS `token1toppools`,
+          `token0_position_type`,
+          `token1_position_type`
+        FROM
+          `dquery_dex`.`dex_swap_tx_solana_1206`
+          USE INDEX ({})
+        WHERE
+          {}
+        ORDER BY
+          `ts` {},
+          `height` {},
+          `tx_id` {},
+          `log_id` {}
+        LIMIT
+          100
+        "#,
+        "{}", // index placeholder for first table
+        where0_clause,
+        "{}", // index placeholder for second table
+        where1_clause,
+        sort_direction, sort_direction, sort_direction, sort_direction
+    );
+    
+    // Build target SQL with actual index
+    let target_sql = base_sql.replace("{}", index_name);
+    
+    // Build verify SQL with primary index if verify is enabled
+    let verify_sql = if verify {
+        Some(base_sql.replace("{}", "primary"))
+    } else {
+        None
+    };
+    
+    // Execute target query
+    let target_rows: Vec<UnionQueryResultWithPosition> = sqlx::query_as(&target_sql).fetch_all(pool).await?;
+    let duration = start.elapsed();
+    
+    // Print SQL if query takes more than 1 second
+    if duration.as_millis() > 1000 {
+        println!("⚠️  Slow query ({}ms):\n{}", duration.as_millis(), target_sql);
+    }
+
+    // Verify logic: compare with primary index query if verify is enabled
+    if verify {
+        if let Some(v_sql) = verify_sql {
+            let verify_start = Instant::now();
+            let verify_rows: Vec<UnionQueryResultWithPosition> = sqlx::query_as(&v_sql).fetch_all(pool).await?;
+            let verify_duration = verify_start.elapsed();
+            
+            // Print verify query log
+            println!("[Verify Query] Latency: {}ms | Rows: {} | Index: primary", 
+                verify_duration.as_millis(),
+                verify_rows.len()
+            );
+            
+            // Compare results: both length and content
+            if target_rows.len() != verify_rows.len() {
+                eprintln!(
+                    "❌ Verify Failed for [Union Query {}]: Target Rows {}, Verify Rows {}",
+                    query_type,
+                    target_rows.len(),
+                    verify_rows.len()
+                );
+                eprintln!("Target SQL (using {} index):\n{}", index_name, target_sql);
+                eprintln!("Verify SQL (using primary index):\n{}", v_sql);
+            } else if target_rows != verify_rows {
+                eprintln!("❌ Verify Failed for [Union Query {}]: Content Mismatch (Row count matches: {})", query_type, target_rows.len());
+                eprintln!("Target SQL (using {} index):\n{}", index_name, target_sql);
+                eprintln!("Verify SQL (using primary index):\n{}", v_sql);
+            } else {
+                println!("✅ Verify Passed: Rows match ({}), Content match", verify_rows.len());
+            }
+        }
+    }
+
+    // Always print query log (not just in verbose mode)
+    let maker_info = if let Some(ref m) = single_maker {
+        format!("Maker: {}", m)
+    } else {
+        "No maker filter".to_string()
+    };
+    let volume_info = if matches!(query_type, 7 | 9 | 10) {
+        format!("Volume >= {}", volume_min)
+    } else {
+        "No volume filter".to_string()
+    };
+    let cursor_info = if cursor_condition.is_some() {
+        format!("Cursor: {}", cursor_condition.as_ref().unwrap())
+    } else {
+        "No cursor".to_string()
+    };
+    
+    println!("[Union Query {}] Latency: {}ms | Rows: {} | Token: {} | Platform: {} | NoAnchor: {} | TS: {} to {} | {} | {} | {} | Sort: {} | Index: {}", 
+        query_type,
+        duration.as_millis(),
+        target_rows.len(),
+        token_addr,
+        platform,
+        no_anchor,
+        start_limit.format("%Y-%m-%d %H:%M:%S"),
+        end_limit.format("%Y-%m-%d %H:%M:%S"),
+        maker_info,
+        volume_info,
+        cursor_info,
+        sort_direction,
+        index_name
+    );
+    
+    // Print full SQL in verbose mode
+    if verbose {
+        println!("  Full SQL:\n{}", target_sql);
+    }
+    
     Ok(duration)
 }
