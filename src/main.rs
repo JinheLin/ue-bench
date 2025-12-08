@@ -399,33 +399,38 @@ fn generate_cursor_condition(
     use_less_than: bool, // true for <, false for >
 ) -> String {
     // Generate random offsets (left/right random)
-    let ts_offset_seconds = rng.gen_range(-86400..86400); // ±1 day
-    let height_offset = rng.gen_range(-1000..1000);
-    let tx_id_offset = rng.gen_range(-100..100);
-    let log_id_offset = rng.gen_range(-50..50);
+    let ts_offset_seconds: i64 = rng.gen_range(-86400..86400); // ±1 day
+    let height_offset: i64 = rng.gen_range(-1000..1000);
+    let tx_id_offset: i64 = rng.gen_range(-100..100);
+    let log_id_offset: i64 = rng.gen_range(-50..50);
+    
+    let ts_offset_abs = ts_offset_seconds.abs() as u64;
+    let height_offset_abs = height_offset.abs() as u64;
+    let tx_id_offset_abs = tx_id_offset.abs() as u64;
+    let log_id_offset_abs = log_id_offset.abs() as u64;
     
     let cursor_ts = if use_less_than {
-        token_sample.ts - ChronoDuration::seconds(ts_offset_seconds.abs())
+        token_sample.ts - ChronoDuration::seconds(ts_offset_abs as i64)
     } else {
-        token_sample.ts + ChronoDuration::seconds(ts_offset_seconds.abs())
+        token_sample.ts + ChronoDuration::seconds(ts_offset_abs as i64)
     };
     
     let cursor_height = if use_less_than {
-        token_sample.height.saturating_sub(height_offset.abs())
+        token_sample.height.saturating_sub(height_offset_abs as i64)
     } else {
-        token_sample.height.saturating_add(height_offset.abs())
+        token_sample.height.saturating_add(height_offset_abs as i64)
     };
     
     let cursor_tx_id = if use_less_than {
-        token_sample.tx_id.map(|id| id.saturating_sub(tx_id_offset.abs()))
+        token_sample.tx_id.map(|id| id.saturating_sub(tx_id_offset_abs as i64))
     } else {
-        token_sample.tx_id.map(|id| id.saturating_add(tx_id_offset.abs()))
+        token_sample.tx_id.map(|id| id.saturating_add(tx_id_offset_abs as i64))
     };
     
     let cursor_log_id = if use_less_than {
-        token_sample.log_id.saturating_sub(log_id_offset.abs())
+        token_sample.log_id.saturating_sub(log_id_offset_abs as i64)
     } else {
-        token_sample.log_id.saturating_add(log_id_offset.abs())
+        token_sample.log_id.saturating_add(log_id_offset_abs as i64)
     };
     
     let tx_id_str = if let Some(tx_id) = cursor_tx_id {
@@ -681,7 +686,6 @@ async fn run_union_query_v2(
     let base_volume = token_sample.volume.unwrap_or(1000.0);
     let volume_variance = base_volume * 0.5; // 50% variance
     let volume_min = (base_volume - volume_variance).max(1.0);
-    let volume_max = base_volume + volume_variance + rng.gen_range(1.0..10000.0);
     
     // Determine ORDER BY direction based on query type
     let (use_desc, sort_direction) = match query_type {
