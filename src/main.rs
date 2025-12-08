@@ -758,7 +758,7 @@ async fn run_union_query_v2(
         r#"
         SELECT
           `ts`,
-          TYPE,
+          `type`,
           `token0_address`,
           `token1_address`,
           `token0_symbol`,
@@ -790,7 +790,7 @@ async fn run_union_query_v2(
         ALL
         SELECT
           `ts`,
-          TYPE,
+          `type`,
           `token0_address`,
           `token1_address`,
           `token0_symbol`,
