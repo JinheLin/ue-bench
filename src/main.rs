@@ -697,14 +697,6 @@ async fn run_union_query_with_index(
     let platform = 16;
     let no_anchor: i8 = 0; // false
     
-    // Random time range using days_back, based on sampled ts (same for both UNION parts)
-    let base_ts = token_sample.ts;
-    let window_days = rng.gen_range(1..=max_days_back);
-    let window_seconds = window_days * 86400;
-    let offset_seconds = rng.gen_range(0..window_seconds);
-    let start_limit = base_ts - ChronoDuration::seconds(offset_seconds);
-    let end_limit = start_limit + ChronoDuration::seconds(window_seconds);
-    
     // Random volume range, based on sampled volume (same for both UNION parts)
     let base_volume = token_sample.volume.unwrap_or(1000.0);
     let volume_variance = base_volume * 0.5; // 50% variance
@@ -762,8 +754,6 @@ async fn run_union_query_with_index(
             AND no_anchor = {} 
             AND type = 0 
             AND maker IN ({}) 
-            AND ts >= '{}' 
-            AND ts <= '{}' 
             AND volume >= {} 
             AND volume <= {} 
         UNION ALL
@@ -785,8 +775,6 @@ async fn run_union_query_with_index(
             AND no_anchor = {} 
             AND type = 1 
             AND maker IN ({}) 
-            AND ts >= '{}' 
-            AND ts <= '{}' 
             AND volume >= {} 
             AND volume <= {} 
         ORDER BY 
@@ -795,13 +783,9 @@ async fn run_union_query_with_index(
         "#,
         "{}", // index placeholder for first table
         token_addr.replace("'", "''"), platform, no_anchor, makers_str,
-        start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
-        end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         volume_min, volume_max,
         "{}", // index placeholder for second table
         token_addr.replace("'", "''"), platform, no_anchor, makers_str,
-        start_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
-        end_limit.format("%Y-%m-%d %H:%M:%S%.3f"),
         volume_min, volume_max,
         sort_direction, sort_direction, sort_direction, sort_direction
     );
@@ -858,15 +842,13 @@ async fn run_union_query_with_index(
     }
 
     // Always print query log (not just in verbose mode)
-    println!("[Union Query] Latency: {}ms | Rows: {} | Token: {} | Makers: {} | Platform: {} | NoAnchor: {} | TS: {} to {} | Volume: {} to {} | Sort: {} | Index: {}", 
+    println!("[Union Query] Latency: {}ms | Rows: {} | Token: {} | Makers: {} | Platform: {} | NoAnchor: {} | Volume: {} to {} | Sort: {} | Index: {}", 
         duration.as_millis(),
         target_rows.len(),
         token_addr,
         selected_makers.len(),
         platform,
         no_anchor,
-        start_limit.format("%Y-%m-%d %H:%M:%S"),
-        end_limit.format("%Y-%m-%d %H:%M:%S"),
         volume_min,
         volume_max,
         sort_direction,
