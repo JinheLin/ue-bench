@@ -131,87 +131,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sampled_data.makers.len());
 
     let shared_data = Arc::new(sampled_data);
-    let start_time = Instant::now();
     let run_duration = Duration::from_secs(args.duration);
     
-    let mut handles = vec![];
-
-    for _ in 0..args.concurrency {
-        let pool = pool.clone();
-        let data_pool = shared_data.clone(); 
-        let verbose = args.verbose;
-        let verify = args.verify;
-        let max_days_back = args.days_back;
-        let maker_count = args.maker_count;
-        let query_type = args.query;
-        let compare = args.compare;
-        
-        let handle = tokio::spawn(async move {
-            let mut rng = StdRng::from_entropy();
-            let mut stats = ThreadStats::new();
-            
-            while start_time.elapsed() < run_duration {
-                let result = if query_type == 1 {
-                    // Query 1: use original function
-                    let compare_index = if compare { Some("idx_tikv") } else { None };
-                    run_union_query(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, maker_count, compare_index).await
-                } else {
-                    // Query 2-10: use new function (convert to same return type for match)
-                    run_union_query_v2(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, query_type).await
-                        .map(|d| (d, None))
-                };
-
-                match result {
-                    Ok((duration, compare_duration)) => {
-                        let micros = duration.as_micros();
-                        stats.query_latencies.push(micros);
-                        
-                        // Record compare latency if available
-                        if let Some(compare_dur) = compare_duration {
-                            let compare_micros = compare_dur.as_micros();
-                            stats.compare_latencies.push(compare_micros);
-                        } else if compare {
-                            // If compare is enabled but compare_duration is None, it means compare query failed
-                            stats.compare_errors += 1;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        stats.errors += 1;
-                        // If compare is enabled, also count as compare error
-                        if compare {
-                            stats.compare_errors += 1;
-                        }
-                    }
-                }
-            }
-            stats
-        });
-        handles.push(handle);
-    }
-
-    let mut total_errors = 0;
-    let mut all_latencies = Vec::new();
-    let mut total_compare_errors = 0;
-    let mut all_compare_latencies = Vec::new();
-
-    for handle in handles {
-        let stats = handle.await?;
-        total_errors += stats.errors;
-        all_latencies.extend(stats.query_latencies);
-        if args.compare {
-            total_compare_errors += stats.compare_errors;
-            all_compare_latencies.extend(stats.compare_latencies);
-        }
-    }
-
-    let elapsed = start_time.elapsed();
-    let total_requests = all_latencies.len();
-    let qps = total_requests as f64 / elapsed.as_secs_f64();
-
     if args.compare && args.query == 1 {
-        // Comparison mode: show both sets of statistics
+        // Comparison mode: run two separate benchmark runs
+        println!("Running Original Index (idx_desc/idx_asc) benchmark for {} seconds...", args.duration);
+        let (total_errors, all_latencies) = run_benchmark_loop(
+            &pool,
+            &shared_data,
+            args.concurrency,
+            args.duration,
+            args.verbose,
+            args.verify,
+            args.days_back,
+            args.maker_count,
+            args.query,
+            None, // No compare index for original run
+        ).await?;
+        
+        println!("\nRunning Compare Index (idx_tikv) benchmark for {} seconds...", args.duration);
+        let (total_compare_errors, all_compare_latencies) = run_benchmark_loop(
+            &pool,
+            &shared_data,
+            args.concurrency,
+            args.duration,
+            args.verbose,
+            args.verify,
+            args.days_back,
+            args.maker_count,
+            args.query,
+            Some("idx_tikv"), // Use idx_tikv for compare run
+        ).await?;
+        
+        // Use the elapsed time from the second run (they should be similar)
+        let elapsed = run_duration;
+        let total_requests = all_latencies.len();
         let total_compare_requests = all_compare_latencies.len();
+        let qps = total_requests as f64 / elapsed.as_secs_f64();
         let compare_qps = total_compare_requests as f64 / elapsed.as_secs_f64();
 
         println!("\n--- 📊 Benchmark Summary (Original Index: idx_desc/idx_asc) ---");
@@ -221,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("QPS: {:.2}", qps);
 
         println!("\n--- ⏱️  Latency Statistics (ms) - Original Index ---");
-        print_percentiles(&format!("Union Query {} (Original)", args.query), &mut all_latencies);
+        print_percentiles(&format!("Union Query {} (Original)", args.query), &mut all_latencies.clone());
 
         println!("\n--- 📊 Benchmark Summary (Compare Index: idx_tikv) ---");
         println!("Total Time: {:.2?}", elapsed);
@@ -230,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("QPS: {:.2}", compare_qps);
 
         println!("\n--- ⏱️  Latency Statistics (ms) - Compare Index ---");
-        print_percentiles(&format!("Union Query {} (idx_tikv)", args.query), &mut all_compare_latencies);
+        print_percentiles(&format!("Union Query {} (idx_tikv)", args.query), &mut all_compare_latencies.clone());
 
         // Performance comparison
         if !all_latencies.is_empty() && !all_compare_latencies.is_empty() {
@@ -241,20 +197,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if qps_diff > 0.0 { "faster" } else { "slower" }
             );
 
-            all_latencies.sort_unstable();
-            all_compare_latencies.sort_unstable();
+            let mut sorted_orig = all_latencies.clone();
+            let mut sorted_compare = all_compare_latencies.clone();
+            sorted_orig.sort_unstable();
+            sorted_compare.sort_unstable();
             
             let to_ms = |us: u128| us as f64 / 1000.0;
-            let len_orig = all_latencies.len() as f64;
-            let len_compare = all_compare_latencies.len() as f64;
+            let len_orig = sorted_orig.len() as f64;
+            let len_compare = sorted_compare.len() as f64;
             
-            let p50_orig = to_ms(all_latencies[(len_orig * 0.50) as usize]);
-            let p95_orig = to_ms(all_latencies[(len_orig * 0.95) as usize]);
-            let p99_orig = to_ms(all_latencies[(len_orig * 0.99) as usize]);
+            let p50_orig = to_ms(sorted_orig[(len_orig * 0.50) as usize]);
+            let p95_orig = to_ms(sorted_orig[(len_orig * 0.95) as usize]);
+            let p99_orig = to_ms(sorted_orig[(len_orig * 0.99) as usize]);
             
-            let p50_compare = to_ms(all_compare_latencies[(len_compare * 0.50) as usize]);
-            let p95_compare = to_ms(all_compare_latencies[(len_compare * 0.95) as usize]);
-            let p99_compare = to_ms(all_compare_latencies[(len_compare * 0.99) as usize]);
+            let p50_compare = to_ms(sorted_compare[(len_compare * 0.50) as usize]);
+            let p95_compare = to_ms(sorted_compare[(len_compare * 0.95) as usize]);
+            let p99_compare = to_ms(sorted_compare[(len_compare * 0.99) as usize]);
             
             let p50_improvement = ((p50_orig - p50_compare) / p50_orig) * 100.0;
             let p95_improvement = ((p95_orig - p95_compare) / p95_orig) * 100.0;
@@ -273,17 +231,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if p99_improvement > 0.0 { "faster" } else { "slower" }
             );
         }
-    } else {
-        // Normal mode: show single set of statistics
-        println!("\n--- 📊 Benchmark Summary ---");
-        println!("Total Time: {:.2?}", elapsed);
-        println!("Total Requests: {}", total_requests);
-        println!("Total Errors: {}", total_errors);
-        println!("QPS: {:.2}", qps);
-
-        println!("\n--- ⏱️  Latency Statistics (ms) ---");
-        print_percentiles(&format!("Union Query {}", args.query), &mut all_latencies);
+        
+        return Ok(());
     }
+    
+    // Normal mode: single benchmark run
+    let start_time = Instant::now();
+    let mut handles = vec![];
+
+    for _ in 0..args.concurrency {
+        let pool = pool.clone();
+        let data_pool = shared_data.clone(); 
+        let verbose = args.verbose;
+        let verify = args.verify;
+        let max_days_back = args.days_back;
+        let maker_count = args.maker_count;
+        let query_type = args.query;
+        
+        let handle = tokio::spawn(async move {
+            let mut rng = StdRng::from_entropy();
+            let mut stats = ThreadStats::new();
+            
+            while start_time.elapsed() < run_duration {
+                let result = if query_type == 1 {
+                    // Query 1: use function with no forced index (random idx_desc/idx_asc)
+                    run_union_query_with_index(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, maker_count, None).await
+                } else {
+                    // Query 2-10: use new function
+                    run_union_query_v2(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, query_type).await
+                };
+
+                match result {
+                    Ok(duration) => {
+                        let micros = duration.as_micros();
+                        stats.query_latencies.push(micros);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        stats.errors += 1;
+                    }
+                }
+            }
+            stats
+        });
+        handles.push(handle);
+    }
+
+    let mut total_errors = 0;
+    let mut all_latencies = Vec::new();
+
+    for handle in handles {
+        let stats = handle.await?;
+        total_errors += stats.errors;
+        all_latencies.extend(stats.query_latencies);
+    }
+
+    let elapsed = start_time.elapsed();
+    let total_requests = all_latencies.len();
+    let qps = total_requests as f64 / elapsed.as_secs_f64();
+
+    println!("\n--- 📊 Benchmark Summary ---");
+    println!("Total Time: {:.2?}", elapsed);
+    println!("Total Requests: {}", total_requests);
+    println!("Total Errors: {}", total_errors);
+    println!("QPS: {:.2}", qps);
+
+    println!("\n--- ⏱️  Latency Statistics (ms) ---");
+    print_percentiles(&format!("Union Query {}", args.query), &mut all_latencies);
 
     Ok(())
 }
@@ -552,7 +566,87 @@ fn generate_cursor_condition(
     )
 }
 
-async fn run_union_query(
+/// Run benchmark loop for a specific index
+async fn run_benchmark_loop(
+    pool: &Pool<MySql>,
+    shared_data: &Arc<SampleData>,
+    concurrency: usize,
+    duration_secs: u64,
+    verbose: bool,
+    verify: bool,
+    max_days_back: i64,
+    maker_count: usize,
+    query_type: u8,
+    force_index: Option<&str>, // If Some, force using this index
+) -> Result<(usize, Vec<u128>), sqlx::Error> {
+    let start_time = Instant::now();
+    let run_duration = Duration::from_secs(duration_secs);
+    let mut handles = vec![];
+
+    for _ in 0..concurrency {
+        let pool = pool.clone();
+        let data_pool = shared_data.clone();
+        let verbose = verbose;
+        let verify = verify;
+        let max_days_back = max_days_back;
+        let maker_count = maker_count;
+        let query_type = query_type;
+        let force_index = force_index.map(|s| s.to_string());
+        
+        let handle = tokio::spawn(async move {
+            let mut rng = StdRng::from_entropy();
+            let mut stats = ThreadStats::new();
+            
+            while start_time.elapsed() < run_duration {
+                let result = if query_type == 1 {
+                    // Query 1: use original function with forced index
+                    run_union_query_with_index(
+                        &pool, 
+                        &mut rng, 
+                        &data_pool, 
+                        max_days_back, 
+                        verbose, 
+                        verify, 
+                        maker_count,
+                        force_index.as_deref(),
+                    ).await
+                } else {
+                    // Query 2-10: use new function (no index forcing for now)
+                    run_union_query_v2(&pool, &mut rng, &data_pool, max_days_back, verbose, verify, query_type).await
+                };
+
+                match result {
+                    Ok(duration) => {
+                        let micros = duration.as_micros();
+                        stats.query_latencies.push(micros);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        stats.errors += 1;
+                    }
+                }
+            }
+            stats
+        });
+        handles.push(handle);
+    }
+
+    let mut total_errors = 0;
+    let mut all_latencies = Vec::new();
+
+    for handle in handles {
+        let stats = handle.await.map_err(|e| {
+            sqlx::Error::Configuration(format!("Task join error: {}", e).into())
+        })?;
+        total_errors += stats.errors;
+        all_latencies.extend(stats.query_latencies);
+    }
+
+    Ok((total_errors, all_latencies))
+}
+
+/// Run UNION ALL query with a specific index (for Query 1)
+async fn run_union_query_with_index(
     pool: &Pool<MySql>, 
     rng: &mut impl Rng, 
     data_pool: &SampleData,
@@ -560,8 +654,8 @@ async fn run_union_query(
     verbose: bool,
     verify: bool,
     maker_count: usize,
-    compare_index: Option<&str>,  // If Some, use this index for comparison
-) -> Result<(Duration, Option<Duration>), sqlx::Error> {
+    force_index: Option<&str>,  // If Some, force using this index instead of random
+) -> Result<Duration, sqlx::Error> {
     // Select random token sample - same address will be used for both token0 and token1
     let token_sample = data_pool.token_samples.choose(rng).expect("No token_samples");
     let token_addr = &token_sample.token_address;
@@ -609,10 +703,27 @@ async fn run_union_query(
     let volume_min = (base_volume - volume_variance).max(1.0);
     let volume_max = base_volume + volume_variance + rng.gen_range(1.0..10000.0);
     
-    // Random sort direction (DESC or ASC)
-    let use_desc = rng.gen_bool(0.5);
-    let index_name = if use_desc { "idx_desc" } else { "idx_asc" };
-    let sort_direction = if use_desc { "DESC" } else { "ASC" };
+    // Determine index and sort direction
+    let (index_name, sort_direction) = if let Some(forced_idx) = force_index {
+        // If index is forced, determine sort direction based on index name
+        match forced_idx {
+            "idx_tikv" => {
+                // For idx_tikv, still use random sort direction
+                let use_desc = rng.gen_bool(0.5);
+                (forced_idx, if use_desc { "DESC" } else { "ASC" })
+            }
+            _ => {
+                // For other forced indices, determine sort direction
+                let use_desc = rng.gen_bool(0.5);
+                (forced_idx, if use_desc { "DESC" } else { "ASC" })
+            }
+        }
+    } else {
+        // Random sort direction (DESC or ASC)
+        let use_desc = rng.gen_bool(0.5);
+        let idx = if use_desc { "idx_desc" } else { "idx_asc" };
+        (idx, if use_desc { "DESC" } else { "ASC" })
+    };
     
     // Build maker IN clause with actual values
     let makers_str = selected_makers.iter()
@@ -697,7 +808,7 @@ async fn run_union_query(
         None
     };
     
-    // Execute target query (original index)
+    // Execute target query
     let target_rows: Vec<UnionQueryResult> = sqlx::query_as(&target_sql).fetch_all(pool).await?;
     let duration = start.elapsed();
     
@@ -705,27 +816,6 @@ async fn run_union_query(
     if duration.as_millis() > 1000 {
         println!("⚠️  Slow query ({}ms):\n{}", duration.as_millis(), target_sql);
     }
-    
-    // Execute comparison query if compare_index is provided
-    let (compare_duration, compare_rows_count) = if let Some(compare_idx) = compare_index {
-        let compare_sql = base_sql.replace("{}", compare_idx);
-        let compare_start = Instant::now();
-        match sqlx::query_as::<_, UnionQueryResult>(&compare_sql).fetch_all(pool).await {
-            Ok(compare_rows) => {
-                let compare_dur = compare_start.elapsed();
-                if compare_dur.as_millis() > 1000 {
-                    println!("⚠️  Slow compare query ({}ms):\n{}", compare_dur.as_millis(), compare_sql);
-                }
-                (Some(compare_dur), Some(compare_rows.len()))
-            }
-            Err(e) => {
-                eprintln!("Error in compare query: {}", e);
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
-    };
 
     // Verify logic: compare with primary index query if verify is enabled
     if verify {
@@ -775,30 +865,12 @@ async fn run_union_query(
         index_name
     );
     
-    // Print compare query log if comparison is enabled
-    if let Some(ref compare_idx) = compare_index {
-        if let Some(ref compare_dur) = compare_duration {
-            let compare_rows = compare_rows_count.unwrap_or(0);
-            println!("[Compare Query] Latency: {}ms | Rows: {} | Index: {}", 
-                compare_dur.as_millis(),
-                compare_rows,
-                compare_idx
-            );
-        }
-    }
-    
     // Print full SQL in verbose mode
     if verbose {
         println!("  Full SQL:\n{}", target_sql);
-        if let Some(ref compare_idx) = compare_index {
-            if compare_duration.is_some() {
-                let compare_sql = base_sql.replace("{}", compare_idx);
-                println!("  Compare SQL ({}):\n{}", compare_idx, compare_sql);
-            }
-        }
     }
     
-    Ok((duration, compare_duration))
+    Ok(duration)
 }
 
 /// Run UNION ALL query for Query 2-10 (with position_type fields)
