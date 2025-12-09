@@ -209,14 +209,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let p50_orig = to_ms(sorted_orig[(len_orig * 0.50) as usize]);
             let p95_orig = to_ms(sorted_orig[(len_orig * 0.95) as usize]);
             let p99_orig = to_ms(sorted_orig[(len_orig * 0.99) as usize]);
+            let p999_orig = to_ms(sorted_orig[(len_orig * 0.999) as usize]);
             
             let p50_compare = to_ms(sorted_compare[(len_compare * 0.50) as usize]);
             let p95_compare = to_ms(sorted_compare[(len_compare * 0.95) as usize]);
             let p99_compare = to_ms(sorted_compare[(len_compare * 0.99) as usize]);
+            let p999_compare = to_ms(sorted_compare[(len_compare * 0.999) as usize]);
             
             let p50_improvement = ((p50_orig - p50_compare) / p50_orig) * 100.0;
             let p95_improvement = ((p95_orig - p95_compare) / p95_orig) * 100.0;
             let p99_improvement = ((p99_orig - p99_compare) / p99_orig) * 100.0;
+            let p999_improvement = ((p999_orig - p999_compare) / p999_orig) * 100.0;
             
             println!("P50 Improvement: {:.2}% ({})", 
                 p50_improvement,
@@ -229,6 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("P99 Improvement: {:.2}% ({})", 
                 p99_improvement,
                 if p99_improvement > 0.0 { "faster" } else { "slower" }
+            );
+            println!("P99.9 Improvement: {:.2}% ({})", 
+                p999_improvement,
+                if p999_improvement > 0.0 { "faster" } else { "slower" }
             );
         }
         
@@ -312,12 +319,13 @@ fn print_percentiles(name: &str, latencies: &mut Vec<u128>) {
     let p50 = latencies[(len * 0.50) as usize];
     let p95 = latencies[(len * 0.95) as usize];
     let p99 = latencies[(len * 0.99) as usize];
+    let p999 = latencies[(len * 0.999) as usize];
     let max = latencies[latencies.len() - 1];
 
     let to_ms = |us: u128| us as f64 / 1000.0;
 
-    println!("{:<25} | Cnt:{:<5} | P50:{:.2}ms | P95:{:.2}ms | P99:{:.2}ms | Max:{:.2}ms",
-        name, latencies.len(), to_ms(p50), to_ms(p95), to_ms(p99), to_ms(max));
+    println!("{:<25} | Cnt:{:<5} | P50:{:.2}ms | P95:{:.2}ms | P99:{:.2}ms | P99.9:{:.2}ms | Max:{:.2}ms",
+        name, latencies.len(), to_ms(p50), to_ms(p95), to_ms(p99), to_ms(p999), to_ms(max));
 }
 
 #[derive(FromRow)]
